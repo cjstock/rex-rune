@@ -152,6 +152,27 @@ pub fn palette_of(chrome: ChromeTheme) -> &'static Palette {
     }
 }
 
+/// A palette made at runtime, from a theme source's colours.
+impl From<&rex_rune::theme_source::ChromeColors> for Palette {
+    fn from(c: &rex_rune::theme_source::ChromeColors) -> Self {
+        Self {
+            ground: c.ground,
+            card: c.card,
+            popover: c.popover,
+            ink: c.ink,
+            muted: c.muted,
+            accent: c.accent,
+            accent2: c.accent2,
+            live: c.live,
+            warning: c.warning,
+            danger: c.danger,
+            on_accent: c.on_accent,
+            terminal_selection: c.terminal_selection,
+            kit: OnceLock::new(),
+        }
+    }
+}
+
 impl Palette {
     /// Whether the ground is light (relative luminance above 0.18), so overlays darken it
     /// instead of lightening it. The built-ins are all dark.

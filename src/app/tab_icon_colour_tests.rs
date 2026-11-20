@@ -482,7 +482,7 @@ fn tab_icon_colours_draw() {
     for (palette, chrome) in ChromeTheme::ALL.into_iter().enumerate() {
         for (mode_id, mode) in MODES.into_iter().enumerate() {
             rt.update(|s, _| {
-                s.settings.chrome_theme = chrome;
+                s.settings.chrome_theme = chrome.into();
                 s.settings.interface.tab_icon_color = mode;
             });
             settle(&mut rt);

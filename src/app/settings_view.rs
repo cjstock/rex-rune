@@ -5,15 +5,16 @@ use super::{
     dialogs::modal_layer,
     panel::{Intent, SettingsSection},
     settings_kit::{
-        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote, page,
-        row_frame, section, segmented, select_row, setting, stepper, unavailable, value_popup,
+        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote,
+        mono_footnote, page, row_frame, section, segmented, select_row, setting, state_chip,
+        stepper, unavailable, value_popup,
     },
     theme::*,
     widgets::{Pill, glyph},
     workspace::Workspace,
 };
 use rex_rune::settings::{
-    NoticePosition, NotificationsConfig, PaneDensity, PaneHeader,
+    ChromeChoice, NoticePosition, NotificationsConfig, PaneDensity, PaneHeader,
     interface::{InterfaceConfig, ToolbarBehavior},
 };
 use rune::{El, KeyEvent, PointerButton, ScrollPos, ScrollSpec, Tx, col, el, row, text};
@@ -61,20 +62,48 @@ fn interface(s: &Workspace) -> El {
         NoticePosition::TopRight => 0,
         NoticePosition::BottomRight => 1,
     };
+    let chrome = if s.following_theme_source() {
+        ChromeChoice::ThemeSource.name()
+    } else {
+        s.settings.chrome_palette().name()
+    };
+    // Left out where the platform can't follow a file.
+    let source = s.theme_source.available.then(|| s.theme_source_said());
+    let mut appearance = vec![setting(
+        "Theme",
+        "Terminals take the matching theme until you choose one.",
+        value_popup("chrome-theme", chrome, Intent::ChooseChrome),
+    )];
+    if let Some(said) = &source {
+        appearance.push(
+            setting(
+                "Theme source",
+                &said.sentence,
+                state_chip("theme-source-state", said.word, said.tone, ""),
+            )
+            .key("theme-source"),
+        );
+    }
+    let mut appearance_notes = Vec::new();
+    if source.is_some() {
+        appearance_notes.push(
+            footnote(
+                "Theme source follows this file, written by DMS, matugen or by hand, for the \
+                 chrome and, under Follow chrome, the terminals:",
+            )
+            .key("theme-source-note"),
+        );
+        appearance_notes.push(
+            mono_footnote(super::downloads::tilde(&s.theme_source.path))
+                .key("theme-source-path")
+                .mt(-6.),
+        );
+    }
     page([
         section(
             "Appearance",
-            [card([
-                setting(
-                    "Theme",
-                    "Terminals take the matching theme until you choose one.",
-                    value_popup(
-                        "chrome-theme",
-                        s.settings.chrome_theme.name(),
-                        Intent::ChooseChrome,
-                    ),
-                ),
-                setting(
+            [card(
+                appearance.into_iter().chain([setting(
                     "Interface zoom",
                     "Chrome and terminals together, from 70% to 150%.",
                     row()
@@ -89,8 +118,10 @@ fn interface(s: &Workspace) -> El {
                         .child(button("zoom-reset", "Reset", Pill::Neutral, |s, tx| {
                             s.change_ui_scale(0, tx)
                         })),
-                ),
-            ])],
+                )]),
+            )]
+            .into_iter()
+            .chain(appearance_notes),
         ),
         section(
             "Toolbar",

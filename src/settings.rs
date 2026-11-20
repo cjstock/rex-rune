@@ -158,6 +158,77 @@ impl ChromeTheme {
     }
 }
 
+/// What the chrome is drawn in: a built-in palette, or the theme source's. Saved as the
+/// palette's name or `theme_source`; a value this version doesn't know reads as Midnight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum ChromeChoice {
+    Palette(ChromeTheme),
+    /// The palette the theme source file gives, followed as it changes.
+    ThemeSource,
+}
+impl Default for ChromeChoice {
+    fn default() -> Self {
+        Self::Palette(ChromeTheme::default())
+    }
+}
+impl From<ChromeTheme> for ChromeChoice {
+    fn from(chrome: ChromeTheme) -> Self {
+        Self::Palette(chrome)
+    }
+}
+impl PartialEq<ChromeTheme> for ChromeChoice {
+    fn eq(&self, other: &ChromeTheme) -> bool {
+        *self == Self::Palette(*other)
+    }
+}
+impl From<String> for ChromeChoice {
+    fn from(value: String) -> Self {
+        if value == "theme_source" {
+            return Self::ThemeSource;
+        }
+        // Every string is a palette: unknown names are Midnight.
+        Self::Palette(serde_json::from_value(serde_json::Value::String(value)).unwrap_or_default())
+    }
+}
+impl From<ChromeChoice> for String {
+    fn from(choice: ChromeChoice) -> Self {
+        match choice {
+            ChromeChoice::ThemeSource => "theme_source".into(),
+            ChromeChoice::Palette(chrome) => serde_json::to_value(chrome)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+        }
+    }
+}
+impl ChromeChoice {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Palette(chrome) => chrome.name(),
+            Self::ThemeSource => "Theme source",
+        }
+    }
+}
+
+/// The theme source: where it is read from, and the palette it replaced.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeSourceConfig {
+    /// The file, absolute or starting with `~`. None is `theme-source` in the state folder.
+    /// Set only in the settings file: Settings has no picker for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The built-in palette in use when Theme source was chosen. The chrome stays in it until
+    /// the file has been read once.
+    pub before: ChromeTheme,
+}
+impl ThemeSourceConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// The terminal theme this client declares to the server, saved as `follow_server`,
 /// `builtin_default`, `follow_chrome` or `named:<id>`. An id is a Ghostty theme's file name,
 /// or a built-in theme's after `rex/`. A value this version doesn't know reads as Follow
@@ -246,7 +317,9 @@ pub struct Settings {
     pub downloads: DownloadsConfig,
     /// Passed to `rex skill setup` as `--session-naming`, always explicitly.
     pub agent_session_naming: bool,
-    pub chrome_theme: ChromeTheme,
+    pub chrome_theme: ChromeChoice,
+    #[serde(skip_serializing_if = "ThemeSourceConfig::is_default")]
+    pub theme_source: ThemeSourceConfig,
     pub terminal_theme: TerminalThemeChoice,
     /// The user picked a terminal theme themselves at least once, so choosing a chrome
     /// palette leaves it alone. Until then a palette brings its paired theme (Follow chrome).
@@ -305,7 +378,8 @@ impl Default for Settings {
             updates: UpdatesConfig::default(),
             downloads: DownloadsConfig::default(),
             agent_session_naming: false,
-            chrome_theme: ChromeTheme::default(),
+            chrome_theme: ChromeChoice::default(),
+            theme_source: ThemeSourceConfig::default(),
             terminal_theme: TerminalThemeChoice::default(),
             terminal_theme_chosen: false,
             terminal_theme_declared: false,
@@ -318,6 +392,15 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    /// The built-in palette the chrome is in, or returns to: the chosen one, or under Theme
+    /// source the one it replaced.
+    pub fn chrome_palette(&self) -> ChromeTheme {
+        match self.chrome_theme {
+            ChromeChoice::Palette(chrome) => chrome,
+            ChromeChoice::ThemeSource => self.theme_source.before,
+        }
+    }
+
     pub fn client_label(&self) -> String {
         self.client_label
             .as_deref()
@@ -764,12 +847,13 @@ mod tests {
             (ChromeTheme::GruvboxDark, "gruvbox_dark"),
         ] {
             let s = Settings {
-                chrome_theme: chrome,
+                chrome_theme: chrome.into(),
                 terminal_theme_chosen: true,
                 ..Settings::default()
             };
             let json = serde_json::to_value(&s).unwrap();
             assert_eq!(json["chrome_theme"], saved);
+            assert!(json.get("theme_source").is_none(), "nothing to save");
             let back: Settings = serde_json::from_value(json).unwrap();
             assert_eq!(back.chrome_theme, chrome);
             assert!(back.terminal_theme_chosen);
@@ -778,6 +862,35 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "chrome_theme": "solarized_light" }))
                 .unwrap();
         assert_eq!(s.chrome_theme, ChromeTheme::Midnight);
+    }
+
+    #[test]
+    fn theme_source_round_trips_with_its_path_and_the_palette_it_replaced() {
+        let s = Settings {
+            chrome_theme: ChromeChoice::ThemeSource,
+            theme_source: ThemeSourceConfig {
+                path: Some("~/.cache/matugen/rex".into()),
+                before: ChromeTheme::GruvboxDark,
+            },
+            ..Settings::default()
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["chrome_theme"], "theme_source");
+        assert_eq!(
+            json["theme_source"],
+            serde_json::json!({"path": "~/.cache/matugen/rex", "before": "gruvbox_dark"})
+        );
+        let back: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(back.chrome_theme, ChromeChoice::ThemeSource);
+        assert_eq!(back.theme_source, s.theme_source);
+        let hand: Settings =
+            serde_json::from_value(serde_json::json!({ "theme_source": { "path": "/x" } }))
+                .unwrap();
+        assert_eq!(
+            (hand.chrome_theme, hand.theme_source.path.as_deref()),
+            (ChromeChoice::Palette(ChromeTheme::Midnight), Some("/x")),
+            "a path alone is not an opt-in"
+        );
     }
 
     #[test]

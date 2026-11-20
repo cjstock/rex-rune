@@ -54,6 +54,7 @@ mod tabs;
 mod term;
 mod terminal_page;
 mod theme;
+mod theme_source;
 mod title_row;
 mod titles;
 mod toolbar;
