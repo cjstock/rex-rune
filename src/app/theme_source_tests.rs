@@ -478,3 +478,117 @@ fn theme_source_settings_draw() {
         rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight.into()), tx));
     }
 }
+
+/// Follow `DARK`, do `change` to the file while the client is closed, and launch again on the
+/// same folder; the new window owns it.
+fn relaunched_after(change: impl FnOnce(&std::path::Path)) -> Workspace {
+    let (ws, hosts, file) = source_workspace(1);
+    std::fs::write(&file, DARK).unwrap();
+    let mut rt = runtime(ws);
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeChoice::ThemeSource), tx));
+    assert_eq!(told(&hosts[0]), [dark_args()]);
+    change(&file);
+    relaunch_owning(&mut rt.state)
+}
+
+fn declared_json(ws: &Workspace) -> Option<Value> {
+    ws.declared_theme()
+        .map(|args| serde_json::to_value(args).unwrap())
+}
+
+/// Leave the process-global palette as the other tests expect it.
+fn back_to_midnight() {
+    crate::app::theme::set_palette(crate::app::theme::palette_of(ChromeTheme::Midnight));
+}
+
+#[test]
+fn a_relaunch_with_the_file_broken_keeps_the_last_good_theme() {
+    let again = relaunched_after(|file| std::fs::write(file, "background = #000000\n").unwrap());
+    assert_eq!(again.palette.ground, 0x1e1e2e, "the stored chrome");
+    assert_eq!(crate::app::theme::kit().c.page, rgb(0x1e1e2e));
+    assert_eq!(again.term_colors().background, 0x1e1e2e);
+    assert_eq!(
+        declared_json(&again),
+        Some(dark_args()),
+        "the stored theme is what every host is told"
+    );
+    let said = again.theme_source_said();
+    assert_eq!(
+        (said.word, said.tone, said.sentence.as_str()),
+        (
+            "Can't read",
+            ChipTone::Attention,
+            "Can't read it: it has no foreground colour; the last colours stay."
+        )
+    );
+    back_to_midnight();
+}
+
+#[test]
+fn a_relaunch_with_the_file_missing_keeps_the_last_good_theme() {
+    let again = relaunched_after(|file| std::fs::remove_file(file).unwrap());
+    assert_eq!(again.palette.ground, 0x1e1e2e, "the stored chrome");
+    assert_eq!(declared_json(&again), Some(dark_args()));
+    let said = again.theme_source_said();
+    assert_eq!(said.sentence, "Not found; the last colours stay.");
+    back_to_midnight();
+}
+
+#[test]
+fn a_relaunch_with_a_changed_good_file_uses_the_new_file_and_remembers_it() {
+    let mut again = relaunched_after(|file| std::fs::write(file, LIGHT).unwrap());
+    assert_eq!(
+        again.palette.ground, 0xfafafa,
+        "the file wins over the record"
+    );
+    assert_eq!(
+        declared_json(&again).map(|args| args["background"].clone()),
+        Some(json!("#fafafa"))
+    );
+    // Gone by the next launch: the light theme is the one remembered now.
+    std::fs::remove_file(&again.theme_source.path).unwrap();
+    let third = relaunch_owning(&mut again);
+    assert_eq!(third.palette.ground, 0xfafafa);
+    assert_eq!(
+        declared_json(&third).map(|args| args["background"].clone()),
+        Some(json!("#fafafa"))
+    );
+    back_to_midnight();
+}
+
+#[test]
+fn a_corrupt_or_too_new_remembered_theme_is_ignored() {
+    for record in [
+        "not a theme at all\n".to_owned(),
+        format!("{DARK}rex-rune-theme-source = 99\n"),
+    ]
+    .map(String::into_bytes)
+    .into_iter()
+    .chain([vec![0xff, 0xfe, 0x00]])
+    {
+        let mut again = relaunched_after(|file| std::fs::remove_file(file).unwrap());
+        let folder = again.settings_path.parent().unwrap().to_path_buf();
+        let stored: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| std::fs::read_to_string(path).is_ok_and(|text| text == DARK))
+            .collect();
+        assert_eq!(stored.len(), 1, "one record, in the window's own folder");
+        std::fs::write(&stored[0], &record).unwrap();
+        let third = relaunch_owning(&mut again);
+        assert_eq!(
+            third.palette.ground, 0x001528,
+            "{record:?}: the palette from before, Midnight"
+        );
+        assert_eq!(
+            third.theme_source_said().sentence,
+            "Not found; Midnight stays until it can be read."
+        );
+        assert_eq!(
+            declared_json(&third),
+            Some(serde_json::to_value(TerminalTheme::midnight().args()).unwrap()),
+            "{record:?}: Follow chrome follows the palette from before"
+        );
+    }
+    back_to_midnight();
+}

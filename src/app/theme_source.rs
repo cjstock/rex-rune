@@ -12,10 +12,13 @@ use super::{
 use rex_rune::{
     settings::{ChromeChoice, Settings, TerminalThemeChoice},
     terminal_theme::{TerminalTheme, paired},
-    theme_source::{self, Read},
+    theme_source::{self, Derived, Read, Remembered},
 };
 use rune::Tx;
-use std::{path::PathBuf, time::SystemTime};
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 /// The theme source as this run knows it.
 pub struct Follow {
@@ -25,8 +28,11 @@ pub struct Follow {
     pub available: bool,
     /// The last reading while following; none before the first.
     pub status: Option<Status>,
-    /// The last theme the file gave this run, kept while it is missing or broken.
+    /// The last theme the file gave, kept while it is missing or broken: this run's, else the
+    /// one remembered from an earlier run.
     good: Option<Good>,
+    /// The last good theme source, kept in local state for the next launch.
+    remembered: Remembered,
 }
 
 /// What the last reading found.
@@ -43,8 +49,19 @@ struct Good {
     terminal: TerminalTheme,
 }
 
+impl From<Derived> for Good {
+    fn from(derived: Derived) -> Self {
+        Self {
+            palette: Palette::from(&derived.chrome).into(),
+            terminal: derived.terminal,
+        }
+    }
+}
+
 impl Follow {
-    pub fn new(settings: &Settings) -> Self {
+    /// `settings_path` is where settings are saved; a test window's folder also holds its
+    /// remembered theme.
+    pub fn new(settings: &Settings, settings_path: &Path) -> Self {
         // Tests never look at the person's own state folder: without a path of their own,
         // theirs is one that can't exist.
         let path = match settings.theme_source.path.as_deref() {
@@ -56,6 +73,14 @@ impl Follow {
             available: cfg!(test) || rex_rune::platform::watch::AVAILABLE,
             status: None,
             good: None,
+            remembered: Remembered::in_folder(&if cfg!(test) {
+                settings_path
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf()
+            } else {
+                rex_rune::platform::dirs::state()
+            }),
         }
     }
 }
@@ -112,19 +137,20 @@ impl Workspace {
     /// [`Self::read_theme_source`] without a transaction, for launch. Whether the chrome
     /// changed.
     pub(super) fn load_theme_source(&mut self) -> bool {
-        let read = theme_source::read(&self.theme_source.path);
+        let read = self.theme_source.remembered.read(&self.theme_source.path);
         let status = match read {
             Read::Theme(derived) => {
-                self.theme_source.good = Some(Good {
-                    palette: Palette::from(&derived.chrome).into(),
-                    terminal: derived.terminal,
-                });
+                self.theme_source.good = Some(derived.into());
                 Status::Applied(SystemTime::now())
             }
             Read::Missing => Status::Missing,
             Read::Unreadable(why) => Status::Unreadable(why),
         };
         self.theme_source.status = Some(status);
+        if self.theme_source.good.is_none() {
+            // Missing or broken before anything was read this run: an earlier run's theme.
+            self.theme_source.good = self.theme_source.remembered.recall().map(Good::from);
+        }
         let Some(good) = &self.theme_source.good else {
             return false;
         };

@@ -260,7 +260,7 @@ impl Workspace {
         // file is back.
         let theme_dirs = ThemeDirs::from_env();
         let palette = PaletteRef::from(palette_of(settings.chrome_palette()));
-        let theme_source = super::theme_source::Follow::new(&settings);
+        let theme_source = super::theme_source::Follow::new(&settings, &path);
         set_palette(palette.clone());
         let (term_theme, theme_error) =
             match theme_dirs.resolve(&settings.terminal_theme, settings.chrome_palette()) {
