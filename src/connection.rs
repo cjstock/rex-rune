@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rexrs::api::{BlockMethod, session, terminal::SetTheme};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -1171,57 +1171,142 @@ async fn query_activity(control: &mut Client, shared: &Shared, state: &mut Contr
     }
 }
 
-/// Declare `theme` to each streamed block Rex would apply it to at once: blocks this client
-/// owns or nobody owns. A block another client owns is left alone; Rex would hold the theme
-/// until this client takes it, and taking it brings the block here again. Under Follow server
-/// (`theme` none), a block this connection declared to gets one empty theme, Rex's own
-/// colours, so the last declaration doesn't stay behind. Repeats are skipped.
+/// How long one `set_theme` may take before a pass moves on; tests wait less.
+const THEME_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 8 });
+
+/// The host's command queue, with the commands a theme pass took off it early. A pass takes
+/// what is queued so it can declare the newest theme: theme changes apply at once, and
+/// everything else waits here, in order, ahead of the queue.
+struct Inbox {
+    commands: flume::Receiver<HostCommand>,
+    held: VecDeque<HostCommand>,
+}
+
+impl Inbox {
+    fn new(commands: flume::Receiver<HostCommand>) -> Self {
+        Self {
+            commands,
+            held: VecDeque::new(),
+        }
+    }
+
+    /// The next command: a held one first, else the next one queued.
+    async fn next(&mut self) -> Result<HostCommand, flume::RecvError> {
+        match self.held.pop_front() {
+            Some(command) => Ok(command),
+            None => self.commands.recv_async().await,
+        }
+    }
+
+    fn try_next(&mut self) -> Option<HostCommand> {
+        self.held
+            .pop_front()
+            .or_else(|| self.commands.try_recv().ok())
+    }
+
+    /// Apply every theme change already queued to `theme`, so only the newest is declared,
+    /// and hold the other commands.
+    fn take_themes(&mut self, theme: &mut Option<SetTheme>) {
+        while let Ok(command) = self.commands.try_recv() {
+            match command {
+                HostCommand::Theme(new) => *theme = new,
+                other => self.held.push_back(other),
+            }
+        }
+    }
+}
+
+/// The theme `block` is due on this connection, if any: `theme`, or under Follow server
+/// (`theme` none) one empty theme where this connection declared colours. None when the
+/// block already has it.
+fn due_theme(state: &ControlState, theme: Option<&SetTheme>, block: &str) -> Option<SetTheme> {
+    let last = state.themed.get(block);
+    let wanted = match theme {
+        Some(theme) => theme.clone(),
+        None if last.is_some_and(|t| *t != SetTheme::new()) => SetTheme::new(),
+        None => return None,
+    };
+    (last != Some(&wanted)).then_some(wanted)
+}
+
+/// Declare `theme` to every terminal block, in every layout the host knows (opened sessions
+/// and the status sweep's background views), that Rex would apply it to at once: blocks this
+/// client owns or nobody owns. This sends `set_theme` and never opens a stream. A block
+/// another client owns is left alone; Rex would hold the theme until this client takes it,
+/// and taking it brings the block here again. Under Follow server (`theme` none), a block
+/// this connection declared to gets one empty theme, Rex's own colours, so the last
+/// declaration doesn't stay behind. Repeats are skipped.
+///
+/// Calls go one at a time. Theme changes queued in `inbox` collapse to the newest before the
+/// pass and before each call, so a newer theme reaches the blocks still waiting, and then the
+/// blocks the pass already did.
 async fn declare_themes(
     control: &mut Client,
     shared: &Shared,
     state: &mut ControlState,
-    workers: &HashMap<String, PaneWorker>,
-    theme: Option<&SetTheme>,
+    theme: &mut Option<SetTheme>,
+    inbox: &mut Inbox,
 ) {
-    let due: Vec<_> = {
-        let m = shared.model.lock().expect("host model");
-        if m.themes_unsupported || !m.connected {
-            return;
-        }
-        workers
-            .iter()
-            .filter_map(|(block, worker)| {
-                let last = state.themed.get(block);
-                let wanted = match theme {
-                    Some(theme) => theme.clone(),
-                    None if last.is_some_and(|t| *t != SetTheme::new()) => SetTheme::new(),
-                    None => return None,
-                };
-                (last != Some(&wanted) && m.themable(&worker.session, block))
-                    .then(|| (worker.session.clone(), block.clone(), wanted))
-            })
-            .collect()
-    };
-    for (session, block, wanted) in due {
-        let call = control.call(wanted.clone().on(session, block.clone()));
-        match tokio::time::timeout(Duration::from_secs(8), call).await {
-            Ok(Err(rexrs::Error::Api(
-                rexrs::ApiError::MethodNotFound { .. } | rexrs::ApiError::NotSupported { .. },
-            ))) => {
-                shared.update(|m| {
-                    m.themes_unsupported = true;
-                    m.notice = Some(
-                        "This Rex server doesn't take terminal themes; its panes keep the server's colours."
-                            .into(),
-                    );
-                });
+    loop {
+        inbox.take_themes(theme);
+        let due: Vec<_> = {
+            let m = shared.model.lock().expect("host model");
+            if m.themes_unsupported || !m.connected {
                 return;
             }
-            // A block that closed meanwhile or a slow reply isn't retried on this connection.
-            _ => {
-                state.themed.insert(block, wanted);
-                shared.update(|m| m.theme_declared = true);
+            m.views
+                .iter()
+                .flat_map(|(session, view)| view_blocks(view).map(move |block| (session, block)))
+                .filter(|(session, block)| {
+                    due_theme(state, theme.as_ref(), block).is_some() && m.themable(session, block)
+                })
+                .map(|(session, block)| (session.clone(), block))
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
+        for (session, block) in due {
+            inbox.take_themes(theme);
+            let Some(wanted) = due_theme(state, theme.as_ref(), &block) else {
+                continue;
+            };
+            if declare_theme(control, shared, state, session, block, wanted).await {
+                return;
             }
+        }
+    }
+}
+
+/// Send one `set_theme`; true when the server refused it, which ends declaring to this host.
+async fn declare_theme(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    session: String,
+    block: String,
+    wanted: SetTheme,
+) -> bool {
+    let call = control.call(wanted.clone().on(session, block.clone()));
+    match tokio::time::timeout(THEME_TIMEOUT, call).await {
+        Ok(Err(rexrs::Error::Api(
+            rexrs::ApiError::MethodNotFound { .. } | rexrs::ApiError::NotSupported { .. },
+        ))) => {
+            shared.update(|m| {
+                m.themes_unsupported = true;
+                m.notice = Some(
+                    "This Rex server doesn't take terminal themes; its panes keep the server's colours."
+                        .into(),
+                );
+            });
+            true
+        }
+        // A block that closed meanwhile or a slow reply isn't retried on this connection,
+        // until the theme changes.
+        _ => {
+            state.themed.insert(block, wanted);
+            shared.update(|m| m.theme_declared = true);
+            false
         }
     }
 }
@@ -1456,6 +1541,7 @@ async fn run_host(
         mut theme,
         label,
     } = startup;
+    let mut inbox = Inbox::new(commands);
     let mut token: Option<String> = None;
     let mut workers = HashMap::<String, PaneWorker>::new();
     let mut retry = 0;
@@ -1574,7 +1660,7 @@ async fn run_host(
                 if let Some((cols, rows, w, h)) = worker.size { resize(&mut control, &worker.session, block, cols, rows, w, h).await?; }
             }
             reconcile(&endpoint, shared, &sender, &mut workers);
-            declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
+            declare_themes(&mut control, shared, &mut state, &mut theme, &mut inbox).await;
             query_activity(&mut control, shared, &mut state).await;
             // Restore terminal sizes and state before a best-effort keymap can wait.
             if let Some(declaration) = &keymap { keymap::refresh(&mut control, shared, declaration).await; }
@@ -1600,7 +1686,7 @@ async fn run_host(
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
-                        declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
+                        declare_themes(&mut control, shared, &mut state, &mut theme, &mut inbox).await;
                         query_activity(&mut control, shared, &mut state).await;
                         continue;
                     }
@@ -1670,6 +1756,8 @@ async fn run_host(
                                 if stale {
                                     let _ = refresh(&mut control, shared, &mut state, &id).await;
                                 }
+                                // Its blocks are themable without a stream.
+                                declare_themes(&mut control, shared, &mut state, &mut theme, &mut inbox).await;
                             }
                         }
                     }
@@ -1686,11 +1774,11 @@ async fn run_host(
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
-                        declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
+                        declare_themes(&mut control, shared, &mut state, &mut theme, &mut inbox).await;
                         query_activity(&mut control, shared, &mut state).await;
                     }
                     error = crate::ssh::closed(&mut tunnel) => return Err(error),
-                    command = commands.recv_async() => {
+                    command = inbox.next() => {
                         busy_since = Some(Instant::now());
                         let Ok(command) = command else { control.close().await?; return Ok(true); };
                         if matches!(command, HostCommand::Shutdown) { control.close().await?; return Ok(true); }
@@ -1773,7 +1861,7 @@ async fn run_host(
                         }
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
-                        declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
+                        declare_themes(&mut control, shared, &mut state, &mut theme, &mut inbox).await;
                         query_activity(&mut control, shared, &mut state).await;
                     }
                 }
@@ -1803,7 +1891,7 @@ async fn run_host(
         loop {
             tokio::select! {
                 _ = &mut delay => break,
-                command = commands.recv_async() => match command {
+                command = inbox.next() => match command {
                     Ok(HostCommand::Shutdown) | Err(_) => return Ok(()),
                     Ok(HostCommand::Reconnect) => break,
                     Ok(HostCommand::Select(id)) => preferred = Some(id),
@@ -1830,7 +1918,7 @@ async fn run_host(
             }
         }
         // Discard input already queued before a failure; never replay it after reconnect.
-        while let Ok(command) = commands.try_recv() {
+        while let Some(command) = inbox.try_next() {
             match command {
                 HostCommand::Shutdown => return Ok(()),
                 HostCommand::Select(id) => preferred = Some(id),
