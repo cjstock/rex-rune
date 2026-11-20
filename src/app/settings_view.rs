@@ -50,12 +50,12 @@ fn header_fade_switch(
             *value = !*value;
             s.save();
         })
-        .build(kit())
+        .build(&kit())
         .key(key.to_owned())
 }
 
 fn interface(s: &Workspace) -> El {
-    let k = kit();
+    let k = &kit();
     let percent = (s.settings.ui_scale * 100.).round() as i32;
     let corner = match s.settings.notice_position {
         NoticePosition::TopRight => 0,
@@ -346,7 +346,7 @@ fn notify_switch(key: &str, label: &str, on: bool, disabled: bool, field: Field)
             }
             s.save();
         })
-        .build(kit())
+        .build(&kit())
         .key(key.to_owned())
 }
 
@@ -589,7 +589,7 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
                 .label(format!("Remote control for {}", host.label))
                 .hide_label()
                 .on_toggle(move |s: &mut Workspace| s.toggle_remote_control(i))
-                .build(kit())
+                .build(&kit())
                 .key(format!("remote-control:{i}")),
         ),
     ])

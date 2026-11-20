@@ -1,6 +1,6 @@
 # Design system
 
-Rex Rune draws calm, dark chrome around terminals that the server owns. Chrome palettes are token sets defined in `src/app/theme.rs`, which is the source of truth, and chosen at runtime (Settings → Interface → Theme): Midnight, the default, Rosé Pine, Rosé Pine Moon and Gruvbox Dark. Their tokens are listed below (update both together). Each palette pairs with a built-in terminal theme whose background equals the chrome's ground, so a single pane reads as one surface with the toolbar. Palettes are dark only and change colours only; fills, borders, motion and layout are shared.
+Rex Rune draws calm chrome around terminals that the server owns. Chrome palettes are token sets defined in `src/app/theme.rs`, which is the source of truth, and chosen at runtime (Settings → Interface → Theme): Midnight, the default, Rosé Pine, Rosé Pine Moon and Gruvbox Dark. Their tokens are listed below (update both together). Each palette pairs with a built-in terminal theme whose background equals the chrome's ground, so a single pane reads as one surface with the toolbar. The built-in palettes are all dark, but a palette may have a light ground (see the interaction fills below). Palettes change colours only; fills, borders, motion and layout are shared.
 
 ## Principles
 
@@ -47,7 +47,7 @@ Progress bars under tab pills and pane names use `ACCENT` (working), `WARNING` (
 
 The paired terminal themes are Midnight (its navy behind Rex's default text), Rosé Pine and Rosé Pine Moon as their Ghostty themes draw them, and Gruvbox Dark's background, text, cursor and 16-colour palette. In every palette `MUTED` on `CARD` and `INK` on `POPOVER` meet WCAG AA (4.5:1); `WARNING` and `DANGER` are at least 3:1 on both surfaces (Gruvbox Dark's red is the lowest, 4.3:1 on its ground and 3.4:1 on popovers) and always carry a word. Switching palettes is instant: colours change in one frame, with no crossfade.
 
-Interaction fills are translucent white over the surface: hover 7%, pressed 11%; borders 6–20% white (focus uses `ACCENT`). Trouble states always carry a word, never colour alone; healthy states show nothing. There is no light chrome palette.
+Interaction fills are translucent white over the surface: hover 7%, pressed 11%; borders 6–20% white (focus uses `ACCENT`). On a light ground (relative luminance above 0.18) every such white overlay is `INK` at 90% of its opacity instead, and shadows are 35% as strong; percentages of "white" elsewhere in this document mean that overlay. A light palette passes the same legibility checks with those overlays. Trouble states always carry a word, never colour alone; healthy states show nothing. There is no built-in light chrome palette.
 
 ## Typography
 

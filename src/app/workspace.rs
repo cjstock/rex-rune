@@ -5,7 +5,7 @@ use super::{
     notify::{Note, Notifier},
     panel::*,
     term::{Term, TermColors},
-    theme::{palette_of, set_palette},
+    theme::{PaletteRef, palette_of, set_palette},
     widgets::ScrollFx,
 };
 use rex_rune::{
@@ -181,6 +181,9 @@ pub struct Workspace {
     pub ssh_setup: super::ssh_setup::Setup,
     /// The tailnet's machines, for Add host.
     pub discovery: super::discover::Discovery,
+    /// The chrome palette in use. The saved chrome choice's built-in, unless a runtime
+    /// palette replaced it; everything that draws in a palette reads this one.
+    pub palette: PaletteRef,
     /// The terminal theme this client declares, from Settings; none is Follow server.
     pub term_theme: Option<TerminalTheme>,
     /// Where Ghostty themes are read from.
@@ -254,7 +257,8 @@ impl Workspace {
         // A theme that can't be read leaves the setting alone: it applies again once its
         // file is back.
         let theme_dirs = ThemeDirs::from_env();
-        set_palette(palette_of(settings.chrome_theme));
+        let palette = PaletteRef::from(palette_of(settings.chrome_theme));
+        set_palette(palette.clone());
         let (term_theme, theme_error) =
             match theme_dirs.resolve(&settings.terminal_theme, settings.chrome_theme) {
                 Ok(theme) => (theme, None),
@@ -343,6 +347,7 @@ impl Workspace {
             integrations: Default::default(),
             ssh_setup: Default::default(),
             discovery: Default::default(),
+            palette,
             term_theme,
             theme_dirs,
             themes: Vec::new(),
@@ -1262,11 +1267,8 @@ impl Workspace {
     }
 
     pub fn term_colors(&self) -> TermColors {
-        TermColors::of(
-            self.term_theme.as_ref(),
-            palette_of(self.settings.chrome_theme),
-        )
-        .with_selection(super::term::SelectionLook::of(&self.settings.terminal))
+        TermColors::of(self.term_theme.as_ref(), &self.palette)
+            .with_selection(super::term::SelectionLook::of(&self.settings.terminal))
     }
 
     /// Declare the theme the user chose, `choice`, from now on, on every host, and remember
@@ -1283,16 +1285,25 @@ impl Workspace {
         Ok(())
     }
 
+    /// Draw the chrome and the terminal bodies in `palette` from now on, at once, without
+    /// changing the saved chrome choice. The palette it replaces is released.
+    pub fn use_palette(&mut self, palette: PaletteRef, tx: &mut Tx) {
+        tx.instant();
+        set_palette(palette.clone());
+        self.palette = palette;
+    }
+
     /// Draw the chrome in `chrome` from now on, at once. Under Follow chrome its paired
     /// terminal theme is declared too; a user who never picked a terminal theme (still on the
     /// default Follow server) is moved to Follow chrome.
     pub fn set_chrome(&mut self, chrome: ChromeTheme, tx: &mut Tx) {
-        tx.instant();
-        if self.settings.chrome_theme == chrome {
+        let builtin = PaletteRef::from(palette_of(chrome));
+        if self.settings.chrome_theme == chrome && self.palette == builtin {
+            tx.instant();
             return;
         }
         self.settings.chrome_theme = chrome;
-        set_palette(palette_of(chrome));
+        self.use_palette(builtin, tx);
         if !self.settings.terminal_theme_chosen
             && self.settings.terminal_theme == TerminalThemeChoice::FollowServer
         {

@@ -316,7 +316,7 @@ fn picker_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// Monospaced | All fonts. Not a Tab stop: the search field keeps the keyboard, and Tab
 /// switches between the two.
 fn scope_switch(mono: bool, width: f32) -> El {
-    let k = kit();
+    let k = &kit();
     let c = &k.c;
     let each = width / 2.;
     let hairline = |color| Shadow {
@@ -423,7 +423,7 @@ fn font_row(s: &Workspace, index: usize) -> El {
 /// The picker, against the control it was opened from and over the Settings page, which
 /// stays where it was and takes no input until the picker closes.
 pub fn popup(s: &Workspace, viewport: [f32; 2]) -> El {
-    let k = kit();
+    let k = &kit();
     let panel = s.panel.as_ref().expect("font picker");
     let PanelKind::Fonts(pick) = panel.kind else {
         return popups::overlay();

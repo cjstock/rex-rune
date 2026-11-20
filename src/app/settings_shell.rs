@@ -175,7 +175,7 @@ fn search_field(s: &Workspace) -> El {
     search_box(
         "settings-search-box",
         30.,
-        input.build(kit()).key("settings-search"),
+        input.build(&kit()).key("settings-search"),
     )
 }
 
@@ -412,7 +412,7 @@ pub fn header(s: &Workspace, page: super::settings_nav::Page) -> El {
             IconButton::new(&CLOSE)
                 .label("Close")
                 .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.close_panel(tx))
-                .build(kit())
+                .build(&kit())
                 .key("close-settings"),
         )
 }

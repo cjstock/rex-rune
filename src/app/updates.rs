@@ -202,7 +202,7 @@ impl Updates {
 }
 
 pub fn section(s: &Workspace) -> El {
-    let k = kit();
+    let k = &kit();
     let u = &s.updates;
     let current = &rex_rune::format_version(&u.config.current_version);
     let channel_label = u.channel.label();

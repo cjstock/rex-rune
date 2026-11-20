@@ -3887,6 +3887,44 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
 }
 
 #[test]
+fn a_runtime_palette_draws_the_chrome_and_terminal_bodies_and_is_freed_when_left() {
+    use super::theme::{PaletteRef, paper, rgb};
+    use rex_rune::settings::ChromeTheme;
+    let mut rt = runtime(workspace_hosts(1));
+    rt.frame(1. / 60.);
+    let window = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("window"))
+            .unwrap()
+            .fill
+    };
+    let light = std::rc::Rc::new(paper());
+    let weak = std::rc::Rc::downgrade(&light);
+    rt.update(|s, tx| s.use_palette(PaletteRef::from(light), tx));
+    rt.frame(1. / 60.);
+    assert_eq!(
+        window(&rt),
+        rgb(0xffffff),
+        "the ground changes in one frame"
+    );
+    assert_eq!(super::theme::kit().c.page, rgb(0xffffff));
+    assert_eq!(
+        rt.state.term_colors().background,
+        0xffffff,
+        "terminal bodies follow the palette in use, not the saved choice"
+    );
+    assert_eq!(rt.state.settings.chrome_theme, ChromeTheme::Midnight);
+
+    // Back to the saved choice: the runtime palette has no holder left.
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight), tx));
+    rt.frame(1. / 60.);
+    assert_eq!(window(&rt), rgb(0x001528));
+    assert_eq!(rt.state.term_colors().background, 0x001528);
+    assert!(weak.upgrade().is_none(), "no palette is leaked per switch");
+}
+
+#[test]
 fn a_palette_round_trip_leaves_terminal_output_and_its_selection_alone() {
     // Compare geometry with this runtime's fonts, not a parallel test's TextSystem.
     // Runtime construction updates the scoped fonts as well as its own renderer.
