@@ -16,14 +16,7 @@ pub fn rgb(value: u32) -> Color {
     }
 }
 
-/// `a` over `b` at opacity `t`, mixed in sRGB.
-pub fn mix(a: u32, b: u32, t: f32) -> u32 {
-    let channel = |shift: u32| {
-        let (x, y) = (((a >> shift) & 0xff) as f32, ((b >> shift) & 0xff) as f32);
-        ((x * t + y * (1. - t)).round() as u32) << shift
-    };
-    channel(16) | channel(8) | channel(0)
-}
+pub use rex_rune::theme_source::legible::mix;
 
 /// A light overlay at `a` on the active palette's ground: see [`Palette::white`].
 pub fn white(a: f32) -> Color {
@@ -177,8 +170,7 @@ impl Palette {
     /// Whether the ground is light (relative luminance above 0.18), so overlays darken it
     /// instead of lightening it. The built-ins are all dark.
     pub fn is_light(&self) -> bool {
-        let g = rgb(self.ground);
-        0.2126 * g.r + 0.7152 * g.g + 0.0722 * g.b > 0.18
+        rex_rune::theme_source::legible::is_light_ground(self.ground)
     }
 
     /// A light overlay at `a`, for fills and borders over this palette's surfaces: white on a
@@ -347,7 +339,7 @@ pub fn on_accent() -> u32 {
 }
 
 /// How much of its tone the `SELECTION` fill is.
-pub const SELECTION_FILL: f32 = 0.18;
+pub use rex_rune::theme_source::legible::SELECTION_FILL;
 
 /// `SELECTION`, the keyboard-selected row of a list, as (fill, outline): a tint of `ACCENT`
 /// under a 1 pt outline in it, so selection is never fill alone and never reads as a hover. A
@@ -368,8 +360,7 @@ pub const SEARCH_CURRENT: f32 = 0.8;
 pub const SEARCH_RADIUS: f32 = 2.5;
 
 /// A keycap's chip: white at this opacity over its surface, and `KEYCAP_LIT` on a selected row.
-pub const KEYCAP_FILL: f32 = 0.07;
-pub const KEYCAP_LIT: f32 = 0.12;
+pub use rex_rune::theme_source::legible::{KEYCAP_FILL, KEYCAP_LIT};
 
 /// A keycap's text: halfway from `MUTED` to `INK`, so that 10.5 pt keys meet 4.5:1 on their
 /// chip in every palette. `MUTED` alone does not on the lighter popovers.
@@ -682,92 +673,29 @@ mod tests {
         assert_eq!(kit().c.text_muted, rgb(0x93a3b8));
     }
 
-    /// WCAG 2 contrast ratio of two sRGB colours.
-    fn contrast(a: u32, b: u32) -> f64 {
-        let luminance = |c: u32| {
-            let channel = |shift: u32| {
-                let v = ((c >> shift) & 0xff) as f64 / 255.;
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-        };
-        let (x, y) = (luminance(a), luminance(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
-
-    /// Hue in degrees.
-    fn hue(c: u32) -> f64 {
-        let [r, g, b] = [16, 8, 0].map(|shift| ((c >> shift) & 0xff) as f64 / 255.);
-        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-        let d = max - min;
-        let h = if d == 0. {
-            0.
-        } else if max == r {
-            ((g - b) / d).rem_euclid(6.)
-        } else if max == g {
-            (b - r) / d + 2.
-        } else {
-            (r - g) / d + 4.
-        };
-        h * 60.
-    }
-
-    /// What a white overlay at `a` over `under` comes to on `p`'s ground: white on a dark
-    /// ground, ink at 90% of `a` on a light one.
-    fn overlay(p: &Palette, a: f32, under: u32) -> u32 {
-        if p.is_light() {
-            mix(p.ink, under, a * 0.9)
-        } else {
-            mix(0xffffff, under, a)
-        }
-    }
-
-    /// The checks every chrome palette passes, built in or not.
+    /// The checks every chrome palette passes, built in or derived: the library's, which the
+    /// derivation adjusts its slots against.
     fn assert_legible(name: &str, p: &Palette) {
-        assert!(contrast(p.muted, p.card) >= 4.5, "{name}: muted on card");
-        assert!(contrast(p.ink, p.popover) >= 4.5, "{name}: ink on popover");
-        // Keycaps: on a popover's rows, and on the sidebar's search chip (itself an 8%
-        // overlay over the card).
-        let keys = mix(p.ink, p.muted, 0.5);
-        for (surface, under, lift) in [("popover", p.popover, 0.), ("sidebar", p.card, 0.08)] {
-            let chip = overlay(p, KEYCAP_FILL + lift, under);
-            assert!(
-                contrast(keys, chip) >= 4.5,
-                "{name}: keycaps on the {surface}"
-            );
-        }
-        // A selected row keeps its label and its keycaps in ink on either tint, and its
-        // outline stands clear of the popover around it.
-        for (kind, tone) in [("selection", p.accent), ("destructive selection", p.danger)] {
-            let fill = mix(tone, p.popover, SELECTION_FILL);
-            assert!(contrast(p.ink, fill) >= 4.5, "{name}: ink on the {kind}");
-            let chip = overlay(p, KEYCAP_LIT, fill);
-            assert!(
-                contrast(p.ink, chip) >= 4.5,
-                "{name}: keycaps on the {kind}"
-            );
-            assert!(contrast(tone, p.popover) >= 3., "{name}: {kind} outline");
-        }
-        // Trouble always carries a word; Gruvbox's brightest red is 4.3:1 on its ground.
-        for (word, color) in [("warning", p.warning), ("danger", p.danger)] {
-            for surface in [p.card, p.popover] {
-                assert!(contrast(color, surface) >= 3., "{name}: {word}");
-            }
-        }
-        let gap = (hue(p.warning) - hue(p.danger)).abs();
-        assert!(
-            gap.min(360. - gap) >= 30.,
-            "{name}: warning and danger differ in hue"
-        );
+        let colors = rex_rune::theme_source::ChromeColors {
+            ground: p.ground,
+            card: p.card,
+            popover: p.popover,
+            ink: p.ink,
+            muted: p.muted,
+            accent: p.accent,
+            accent2: p.accent2,
+            live: p.live,
+            warning: p.warning,
+            danger: p.danger,
+            on_accent: p.on_accent,
+            terminal_selection: p.terminal_selection,
+        };
+        let failures = rex_rune::theme_source::legible::failures(&colors);
+        assert!(failures.is_empty(), "{name}: {failures:?}");
     }
 
     #[test]
     fn every_palette_is_legible_and_pairs_with_its_terminal_theme() {
-        assert!((contrast(0xffffff, 0x000000) - 21.).abs() < 1e-9);
         for chrome in ChromeTheme::ALL {
             let p = palette_of(chrome);
             let name = chrome.name();
@@ -789,6 +717,26 @@ mod tests {
         let paper = paper();
         assert!(paper.is_light());
         assert_legible("paper", &paper);
+        // And every palette derived from the committed theme source samples.
+        let samples =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/theme-source");
+        let mut derived = 0;
+        for entry in std::fs::read_dir(samples).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            let Ok(source) = rex_rune::theme_source::ThemeSource::parse(&text) else {
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let p = Palette::from(&source.derive().chrome);
+            assert_eq!(
+                p.is_light(),
+                source.terminal.scheme == Some("light"),
+                "{name}"
+            );
+            assert_legible(&name, &p);
+            derived += 1;
+        }
+        assert!(derived >= 13, "the samples are there");
     }
 
     #[test]
