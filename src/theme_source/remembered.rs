@@ -5,7 +5,7 @@
 //! the same parser and derivation. So a record needs no format of its own: one a newer client
 //! wrote (a newer `rex-rune-theme-source` version), or one that was damaged, is refused exactly
 //! as the file would be, and a change to how the chrome is derived reaches it too.
-use super::{Derived, Read, derive_text, text};
+use super::{Derived, Read, derive_text, unread};
 use std::path::{Path, PathBuf};
 
 /// The record's name in its folder.
@@ -30,12 +30,20 @@ impl Remembered {
     }
 
     /// Read the theme source at `source`, as [`super::read`] does, and keep its text when it
-    /// gives a theme that isn't the one already kept. Keeping is best effort: a record that
-    /// can't be written leaves the reading as it is.
+    /// gives a theme that isn't the one already kept.
     pub fn read(&mut self, source: &Path) -> Read {
-        let text = match text(source) {
-            Ok(text) => text,
-            Err(none) => return none.into(),
+        match std::fs::read(source) {
+            Ok(bytes) => self.decode(bytes),
+            Err(error) => unread(&error),
+        }
+    }
+
+    /// What a theme source's bytes give, as [`super::decode`] does, keeping their text when
+    /// they give a theme. Keeping is best effort: a record that can't be written leaves the
+    /// reading as it is.
+    pub fn decode(&mut self, bytes: Vec<u8>) -> Read {
+        let Ok(text) = String::from_utf8(bytes) else {
+            return Read::Unreadable("it isn't text".into());
         };
         let read = derive_text(&text);
         if matches!(read, Read::Theme(_)) {
@@ -46,7 +54,7 @@ impl Remembered {
 
     /// The theme the record gives, if there is one and it can still be read.
     pub fn recall(&self) -> Option<Derived> {
-        match derive_text(&text(&self.path).ok()?) {
+        match derive_text(&std::fs::read_to_string(&self.path).ok()?) {
             Read::Theme(derived) => Some(derived),
             _ => None,
         }

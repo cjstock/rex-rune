@@ -104,35 +104,27 @@ pub enum Read {
 
 /// Read the theme source at `path` and derive what it gives.
 pub fn read(path: &Path) -> Read {
-    match text(path) {
+    match std::fs::read(path) {
+        Ok(bytes) => decode(bytes),
+        Err(error) => unread(&error),
+    }
+}
+
+/// What a theme source that could not be read gives: for a follower that reads the bytes
+/// itself, to compare them before deriving them ([`decode`]).
+pub fn unread(error: &std::io::Error) -> Read {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => Read::Missing,
+        kind => Read::Unreadable(kind.to_string()),
+    }
+}
+
+/// What a theme source's bytes give.
+pub fn decode(bytes: Vec<u8>) -> Read {
+    match String::from_utf8(bytes) {
         Ok(text) => derive_text(&text),
-        Err(none) => none.into(),
+        Err(_) => Read::Unreadable("it isn't text".into()),
     }
-}
-
-/// Why a file has no text to read.
-enum NoText {
-    Missing,
-    Unreadable(String),
-}
-
-impl From<NoText> for Read {
-    fn from(none: NoText) -> Self {
-        match none {
-            NoText::Missing => Read::Missing,
-            NoText::Unreadable(why) => Read::Unreadable(why),
-        }
-    }
-}
-
-/// The file's text, or why there is none.
-fn text(path: &Path) -> Result<String, NoText> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(NoText::Missing),
-        Err(error) => return Err(NoText::Unreadable(error.kind().to_string())),
-    };
-    String::from_utf8(bytes).map_err(|_| NoText::Unreadable("it isn't text".into()))
 }
 
 fn derive_text(text: &str) -> Read {

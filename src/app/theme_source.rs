@@ -1,8 +1,12 @@
 //! Following the theme source: reading the file into the chrome palette and, under Follow
 //! chrome, the declared terminal theme; and what Settings says about it.
 //!
-//! [`Workspace::read_theme_source`] is the one way in: choosing the entry, launch and (later)
-//! the file watcher's wake all read the file through it. The derivation itself is the
+//! [`Workspace::read_theme_source`] is the file watcher's wake (`platform::watch`, followed
+//! while the entry is chosen); choosing the entry and launch read the file the same way, but
+//! always apply it. A wake whose bytes are the ones last read does nothing, and a broken read
+//! of a file changed within the watcher's settle window is a writer not done yet: neither is
+//! reported. Going from good to broken or missing posts one notice, taken back silently once
+//! the file is good again; meanwhile the last good theme stays. The derivation itself is the
 //! library's ([`rex_rune::theme_source`]); hosts only ever see the resulting theme command.
 use super::{
     settings_kit::ChipTone,
@@ -10,12 +14,14 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::{
+    platform::watch::{self, Watch},
     settings::{ChromeChoice, Settings, TerminalThemeChoice},
     terminal_theme::{TerminalTheme, paired},
     theme_source::{self, Derived, Read, Remembered},
 };
 use rune::Tx;
 use std::{
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -33,6 +39,12 @@ pub struct Follow {
     good: Option<Good>,
     /// The last good theme source, kept in local state for the next launch.
     remembered: Remembered,
+    /// A hash of the bytes last read; none when there were none.
+    seen: Option<u64>,
+    /// The notice that said the file went bad, taken back when it is good again.
+    bad_notice: Option<u64>,
+    /// The file being followed, while the entry is chosen.
+    watch: Option<(PathBuf, Watch)>,
 }
 
 /// What the last reading found.
@@ -81,8 +93,40 @@ impl Follow {
             } else {
                 rex_rune::platform::dirs::state()
             }),
+            seen: None,
+            bad_notice: None,
+            watch: None,
         }
     }
+
+    /// The file being followed as it changes, if any.
+    pub fn watching(&self) -> Option<&Path> {
+        self.watch.as_ref().map(|(path, _)| path.as_path())
+    }
+}
+
+/// What the file holds now, and a hash of its bytes when it has any. A theme it gives is
+/// remembered for the next launch.
+fn reading(path: &Path, remembered: &mut Remembered) -> (Read, Option<u64>) {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            (remembered.decode(bytes), Some(hasher.finish()))
+        }
+        Err(error) => (theme_source::unread(&error), None),
+    }
+}
+
+/// The file changed within the watcher's settle window, so a writer may not be done with it.
+fn still_settling(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .map_or(true, |age| age < watch::SETTLE)
+        })
 }
 
 /// What the Theme source row says: a word for its chip, and one sentence.
@@ -118,7 +162,8 @@ impl Workspace {
             }
         }
         self.save();
-        self.read_theme_source(tx);
+        self.load_theme_source();
+        self.watch_theme_source();
         if moved && self.theme_source.good.is_none() {
             // Nothing read yet: Follow chrome follows the palette still in use.
             self.term_theme = Some((paired(self.settings.chrome_palette()).theme)());
@@ -126,18 +171,67 @@ impl Workspace {
         }
     }
 
-    /// Read the theme source again and apply what it gives, in one frame. A missing or broken
-    /// file changes nothing on screen: the last good theme stays, or the palette from before.
+    /// The file watcher's wake: read the theme source again and apply what it gives, in one
+    /// frame. The same bytes as last time do nothing; a broken file changed within the settle
+    /// window is not done being written and is not reported. A missing or broken file changes
+    /// nothing on screen: the last good theme stays, or the palette from before.
     pub fn read_theme_source(&mut self, tx: &mut Tx) {
-        if self.following_theme_source() && self.load_theme_source() {
+        if !self.following_theme_source() {
+            return;
+        }
+        let (read, seen) = reading(&self.theme_source.path, &mut self.theme_source.remembered);
+        if seen.is_some() && seen == self.theme_source.seen {
+            return;
+        }
+        if seen.is_some()
+            && matches!(read, Read::Unreadable(_))
+            && still_settling(&self.theme_source.path)
+        {
+            return;
+        }
+        if self.apply_theme_source(read, seen) {
             tx.instant();
         }
     }
 
-    /// [`Self::read_theme_source`] without a transaction, for launch. Whether the chrome
-    /// changed.
+    /// Read the theme source and apply it whatever it holds, for launch and for choosing the
+    /// entry. Whether the chrome changed.
     pub(super) fn load_theme_source(&mut self) -> bool {
-        let read = self.theme_source.remembered.read(&self.theme_source.path);
+        let (read, seen) = reading(&self.theme_source.path, &mut self.theme_source.remembered);
+        self.apply_theme_source(read, seen)
+    }
+
+    /// Follow the file while the entry is chosen, and only then: started, stopped or moved to
+    /// a new path to match. Where the platform can't, nothing follows it.
+    pub(super) fn watch_theme_source(&mut self) {
+        let wanted = self
+            .following_theme_source()
+            .then(|| self.theme_source.path.clone());
+        if self.theme_source.watching() == wanted.as_deref() {
+            return;
+        }
+        self.theme_source.watch = None;
+        let Some(path) = wanted else {
+            return;
+        };
+        let handle = self.handle.clone();
+        match watch::file(&path, move || {
+            handle.update(|s, tx| s.read_theme_source(tx));
+        }) {
+            Ok(watch) => self.theme_source.watch = Some((path, watch)),
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {}
+            Err(error) => eprintln!(
+                "Could not follow the theme source at {} ({error}); it is read at launch and when chosen.",
+                path.display()
+            ),
+        }
+    }
+
+    /// Apply one reading: the theme it gives, or the last good one; and the one notice when the
+    /// file goes from good to bad. Whether the chrome changed.
+    fn apply_theme_source(&mut self, read: Read, seen: Option<u64>) -> bool {
+        self.theme_source.seen = seen;
+        let was_good = matches!(self.theme_source.status, Some(Status::Applied(_)));
         let status = match read {
             Read::Theme(derived) => {
                 self.theme_source.good = Some(derived.into());
@@ -146,6 +240,26 @@ impl Workspace {
             Read::Missing => Status::Missing,
             Read::Unreadable(why) => Status::Unreadable(why),
         };
+        let went_bad = match &status {
+            Status::Applied(_) => None,
+            Status::Missing => Some("The theme source is gone; the last colours stay".to_owned()),
+            Status::Unreadable(why) => Some(format!(
+                "Can't read the theme source: {why}; the last colours stay"
+            )),
+        };
+        match went_bad {
+            None => {
+                if let Some(id) = self.theme_source.bad_notice.take() {
+                    self.dismiss_notice(id);
+                }
+            }
+            Some(text) if was_good && self.theme_source.good.is_some() => {
+                self.notify(text.clone());
+                self.theme_source.bad_notice =
+                    self.notices.iter().find(|n| n.text == text).map(|n| n.id);
+            }
+            Some(_) => {}
+        }
         self.theme_source.status = Some(status);
         if self.theme_source.good.is_none() {
             // Missing or broken before anything was read this run: an earlier run's theme.

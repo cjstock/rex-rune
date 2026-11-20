@@ -364,6 +364,7 @@ impl Workspace {
         if this.following_theme_source() {
             this.load_theme_source();
         }
+        this.watch_theme_source();
         if let Some(error) = theme_error {
             this.notify(format!("{error:#}; following the server's colours"));
         }
@@ -1325,6 +1326,7 @@ impl Workspace {
             self.term_theme = Some((paired(chrome).theme)());
             self.declare_theme();
         }
+        self.watch_theme_source();
         self.save();
     }
 
