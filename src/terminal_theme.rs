@@ -166,19 +166,8 @@ impl TerminalTheme {
     pub fn parse(name: &str, text: &str) -> Result<Self> {
         let mut theme = Self::default();
         let mut known = false;
-        for line in text.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let value = value.trim();
-            let value = value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .unwrap_or(value);
-            let slot = match key.trim() {
+        for (key, value) in entries(text) {
+            let slot = match key {
                 "palette" => {
                     known = true;
                     if let Some((index, color)) = value.split_once('=')
@@ -233,6 +222,23 @@ impl TerminalTheme {
         }
         set
     }
+}
+
+/// A Ghostty config file's `key = value` entries in file order: comments and blank lines
+/// skipped, a quoted value unquoted. Read in order, a later entry for a key wins.
+pub(crate) fn entries(text: &str) -> impl Iterator<Item = (&str, &str)> {
+    text.lines().map(str::trim).filter_map(|line| {
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+        Some((key.trim(), value))
+    })
 }
 
 /// Whether a colour reads as light: perceived brightness above half.
@@ -359,7 +365,7 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
 }
 
-fn parse_hex(value: &str) -> Option<u32> {
+pub(crate) fn parse_hex(value: &str) -> Option<u32> {
     let digits = value.strip_prefix('#').unwrap_or(value);
     if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
