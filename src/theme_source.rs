@@ -104,15 +104,39 @@ pub enum Read {
 
 /// Read the theme source at `path` and derive what it gives.
 pub fn read(path: &Path) -> Read {
+    match text(path) {
+        Ok(text) => derive_text(&text),
+        Err(none) => none.into(),
+    }
+}
+
+/// Why a file has no text to read.
+enum NoText {
+    Missing,
+    Unreadable(String),
+}
+
+impl From<NoText> for Read {
+    fn from(none: NoText) -> Self {
+        match none {
+            NoText::Missing => Read::Missing,
+            NoText::Unreadable(why) => Read::Unreadable(why),
+        }
+    }
+}
+
+/// The file's text, or why there is none.
+fn text(path: &Path) -> Result<String, NoText> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Missing,
-        Err(error) => return Read::Unreadable(error.kind().to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(NoText::Missing),
+        Err(error) => return Err(NoText::Unreadable(error.kind().to_string())),
     };
-    let Ok(text) = String::from_utf8(bytes) else {
-        return Read::Unreadable("it isn't text".into());
-    };
-    match ThemeSource::parse(&text) {
+    String::from_utf8(bytes).map_err(|_| NoText::Unreadable("it isn't text".into()))
+}
+
+fn derive_text(text: &str) -> Read {
+    match ThemeSource::parse(text) {
         Ok(source) => Read::Theme(source.derive()),
         Err(reason) => Read::Unreadable(reason),
     }
@@ -277,6 +301,9 @@ fn contrast(a: u32, b: u32) -> f64 {
     let (x, y) = (luminance(a), luminance(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
+
+mod remembered;
+pub use remembered::Remembered;
 
 #[cfg(test)]
 mod tests;
