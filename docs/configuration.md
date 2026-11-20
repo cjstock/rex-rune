@@ -46,8 +46,9 @@ Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json`
   horizontal value on all four sides);
 - terminal font family (`font_family`), ordered fallback families
   (`font_fallbacks`), font size, the chrome palette (`chrome_theme`:
-  `"midnight"`, `"rose_pine"`, `"rose_pine_moon"` or `"gruvbox_dark"`; an unknown
-  value is Midnight), the terminal theme (`terminal_theme`: `"follow_server"`,
+  `"midnight"`, `"rose_pine"`, `"rose_pine_moon"`, `"gruvbox_dark"` or, on Linux,
+  `"theme_source"`; an unknown value is Midnight), the [theme source](#theme-source)'s
+  path and the palette it replaced (`theme_source`), the terminal theme (`terminal_theme`: `"follow_server"`,
   `"builtin_default"` for Rex's own colours, `"follow_chrome"`, or
   `"named:<name>"` with `rex/midnight`, `rex/rose-pine`, `rex/rose-pine-moon`,
   `rex/gruvbox-dark` or a Ghostty theme's file name), whether you have picked a
@@ -293,6 +294,111 @@ empty `set_theme`, Rex's own colours, to each pane this client owns or nobody ow
 once per pane per connection, when its stream starts, when this client takes it,
 and again after a reconnect. A server without `set_theme` is reported once and the
 choice is kept for other hosts.
+
+### Theme source
+
+On Linux, the chrome can follow a **theme source** instead: a file on this
+machine, written by DMS, by any other program or by hand, that supplies both a
+chrome palette and a terminal theme. Choose **Theme source** in Settings →
+Interface → Theme or in **Change interface theme…**; it is off by default, and
+you leave it by choosing a palette. Under Follow chrome (which choosing it
+selects until you pick a terminal theme yourself, as a palette does), the
+terminal theme declared to the server is the file's once it has been read.
+While the entry is chosen, the client reads the file at launch and follows it:
+a change, written in place or renamed into place, repaints the chrome in one
+frame about 100 ms after the writer finishes, light or dark as the file says,
+and declares the new terminal theme on every connected host to every pane this
+client owns or nobody owns, in every session the client knows of, opened or
+not. A pane another client owns keeps that client's colours. Rewriting the file with the same bytes
+does nothing. The Theme source row under Theme says whether the file was found,
+when it was last applied, or why it can't be read, and the footnote names its
+path. macOS and Windows can't follow a file, so the entry is left out there.
+
+The file is a Ghostty theme (`key = value` lines, `#` comments, a later line
+wins, unknown keys ignored), so any Ghostty theme file is a theme source.
+`background` and `foreground` are required; `palette = N=#rrggbb`,
+`selection-background` and `selection-foreground` are read as Ghostty reads them.
+Three kinds of key are its own, all optional:
+
+- `chrome-ground`, `chrome-card`, `chrome-popover`, `chrome-ink`,
+  `chrome-muted`, `chrome-accent`, `chrome-accent2`, `chrome-live`,
+  `chrome-warning`, `chrome-danger` and `chrome-on-accent` set a chrome colour
+  (`#rrggbb`), used exactly as written: never adjusted and never checked.
+- `scheme = dark` or `scheme = light` says which the theme is; without it the
+  background decides. It is declared with the terminal theme.
+- `rex-rune-theme-source = 1` is the format's version. A file without one is read
+  as version 1; a newer version is refused.
+
+```
+rex-rune-theme-source = 1
+scheme = dark
+background = #1b2433
+foreground = #d8dee9
+palette = 4=#81a1c1
+chrome-accent = #88c0d0
+```
+
+Chrome colours the file leaves out are derived from its terminal colours: the
+ground and card from `background`, ink from `foreground`, the popover and muted
+text from ink over the ground, the accent, second accent, live, warning and
+danger colours from the blue, magenta, green, yellow and red palette entries
+(Ghostty's default colours for entries the file leaves out), and the terminal
+selection from `selection-background`, else the accent over the ground. The
+cursor colour is never used. Derived colours are then adjusted until the
+chrome passes the same legibility checks as the built-in palettes: status
+colours move away from the ground in lightness, a warning too close in hue to
+danger turns away from it, grey trouble colours take a standard amber and red,
+ink lifts away from the ground, and as a last resort the chrome's ground darkens
+(or lightens, for a light theme) away from the terminal background, which the
+panes keep. A theme is never replaced by a built-in palette.
+
+The file is `$XDG_STATE_HOME/rex-rune/theme-source` (default
+`~/.local/state/rex-rune/theme-source`). To read another file, set its path,
+absolute or starting with `~/`, in `workspace.json`; Settings has no picker for
+it, and a path alone does not choose Theme source:
+
+```json
+{
+  "chrome_theme": "theme_source",
+  "theme_source": { "path": "~/themes/rex-rune" }
+}
+```
+
+Until the file has given a theme, in this run or an earlier one, the chrome
+stays in the palette you had (saved as `theme_source.before`). A missing, empty
+or broken file, or one whose version is too new, never changes what is on
+screen: the last good colours stay, and the row says why. Going from a good file to a missing or broken one
+posts one notice, never repeated while it stays bad and taken back when the file
+is good again; a read made while the file is still being written is not
+reported. The last good file is kept in
+`$XDG_STATE_HOME/rex-rune/last-good-theme-source`, so a launch that finds the
+file missing or broken starts with those colours; a good file at launch always
+wins.
+
+**Set up DMS.** Where `dms` is installed (on `PATH`, or in `$XDG_BIN_HOME`,
+default `~/.local/bin`), the Theme source row offers **Set up DMS** while the
+client's DMS drop-in is missing, out of date or names another file. It never runs DMS or matugen and
+never touches your own `~/.config/matugen/config.toml`; pressing it writes two
+files, each starting with a `# Generated by Rex Rune` comment:
+
+- the theme source template, `$XDG_DATA_HOME/rex-rune/matugen/theme-source-template`
+  (default `~/.local/share/…`), which a newer client refreshes at launch if its
+  text changed;
+- the drop-in, `$XDG_CONFIG_HOME/matugen/dms/configs/rex-rune.toml` (default
+  `~/.config/…`), whose one `[templates.rex-rune]` entry has DMS render the
+  template into the theme source path, written as `~/…` under your home folder.
+
+At the default path it also makes the theme source's folder. The row then
+says it is waiting for DMS until DMS next regenerates its colours (change the
+wallpaper or switch light and dark); from then on each change re-themes the
+chrome and owned panes. The template takes DMS's Material colours for the
+chrome, the same terminal colours as DMS's own Ghostty template (as of DMS
+2.1.2), and `scheme` from DMS's mode, so panes
+follow the scheme's mode: DMS's **Terminals always dark** is not honoured. A
+drop-in of that name that the client didn't write is left alone. Leaving Theme
+source leaves both files in place; to stop DMS writing the theme source, delete
+the drop-in, `~/.config/matugen/dms/configs/rex-rune.toml` by default (Settings
+names it under Theme while it is the client's).
 
 ## Terminal display, selection and fonts
 

@@ -66,6 +66,9 @@ client, launcher and icons, never the `rex` server.
 - **Fonts and themes.** Chrome palettes, terminal themes declared to the server
   including Ghostty files, installed fonts with a picker and ordered fallbacks,
   bundled IBM Plex Mono and Symbols Nerd Font, font size and live metrics.
+  On Linux the chrome and owned panes can follow a
+  [theme source](docs/configuration.md#theme-source) file: **Set up DMS** has
+  DMS write it, and any program can write the documented format.
 - **Layout and interface.** Zoom, independent padding, density, pane outline,
   header fading, tab icon count and colour, tab fill, toolbar visibility, full
   screen, and a Linux borderless window; on macOS the toolbar is the title row
