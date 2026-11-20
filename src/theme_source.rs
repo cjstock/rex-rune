@@ -18,6 +18,7 @@
 //! Nothing here knows about the UI or about hosts: [`read`] turns a path into a chrome palette's
 //! colours and a terminal theme, or says why it can't.
 use crate::terminal_theme::{TerminalTheme, entries, is_light, parse_hex};
+use legible::{KEYCAP_FILL, SIDEBAR_CHIP, TEXT, contrast, mix};
 use std::path::{Path, PathBuf};
 
 /// The newest format version this client reads.
@@ -173,7 +174,8 @@ impl ThemeSource {
     }
 
     /// The chrome palette and terminal theme this source gives. A keyed slot is used as
-    /// written; every other slot takes its starting value from the terminal colours:
+    /// written, never adjusted and never checked; every other slot takes its starting value
+    /// from the terminal colours:
     ///
     /// | Slot | Starting value |
     /// | --- | --- |
@@ -188,22 +190,73 @@ impl ThemeSource {
     ///
     /// Palette entries the file leaves out read as Ghostty's default 16 colours. The cursor
     /// colour is never used.
+    ///
+    /// The derived slots are then adjusted until the palette passes [`legible::failures`],
+    /// stopping at the first palette that does:
+    ///
+    /// 1. A failing accent, accent2, live, warning or danger moves its lightness away from the
+    ///    ground, 2% at a time, keeping its hue, until every contrast check on it passes.
+    /// 2. A warning less than 30° from danger turns its hue away from danger, just far enough,
+    ///    then moves as in step 1.
+    /// 3. A grey (monochrome) danger or warning takes a canonical red or amber instead, then
+    ///    moves as in step 1.
+    /// 4. Ink's lightness lifts away from the ground 2% at a time (up to 25 steps); popover and
+    ///    muted follow it and every slot is derived again.
+    /// 5. As a last resort the chrome ground steps 5% toward black, or white for a light theme
+    ///    (up to 15 steps), and everything is derived again. The terminal theme keeps its own
+    ///    background, so the panes keep theirs.
+    ///
+    /// Within one pass, grey trouble colours are replaced before the warning turns, as in the
+    /// reference derivation: a canonical red can bring a theme's own warning within 30° of it.
+    /// Derived slots adjust around keyed ones (warning turns away from a keyed danger), and a
+    /// check that reads only keyed slots never holds the rest back. If nothing passes, the
+    /// palette is the unadjusted one: never a built-in.
     pub fn derive(&self) -> Derived {
+        let keyed = legible::keyed_slots(&self.keyed);
+        let chrome = (0..=GROUND_STEPS)
+            .flat_map(|ground| (0..=INK_STEPS).map(move |ink| (ink, ground)))
+            .map(|(ink, ground)| self.attempt(ink, ground))
+            .find(|chrome| legible::passes_around(chrome, keyed))
+            .unwrap_or_else(|| self.attempt(0, 0));
+        Derived {
+            chrome,
+            terminal: self.terminal.clone(),
+        }
+    }
+
+    /// The palette with ink lifted `lift` steps and the ground moved `deepen` steps, its
+    /// status colours adjusted (steps 1–3).
+    fn attempt(&self, lift: u32, deepen: u32) -> ChromeColors {
         let t = &self.terminal;
         let k = &self.keyed;
         let light = t.scheme == Some("light");
-        let ground = k.ground.or(t.background).unwrap_or_default();
+        let background = t.background.unwrap_or_default();
+        let ground = k.ground.unwrap_or_else(|| {
+            let toward = if light { 0xffffff } else { 0 };
+            mix(toward, background, GROUND_STEP * deepen as f32)
+        });
         let card = k.card.unwrap_or(ground);
-        let ink = k.ink.or(t.foreground).unwrap_or_default();
+        let ink = k.ink.unwrap_or_else(|| {
+            let foreground = t.foreground.unwrap_or_default();
+            if lift == 0 {
+                return foreground;
+            }
+            let (h, l, s) = hls::from_rgb(foreground);
+            hls::to_rgb(h, l + away(ground) * LIGHTNESS_STEP * lift as f64, s)
+        });
         let popover = k.popover.unwrap_or_else(|| mix(ink, ground, 0.07));
-        // The light overlay a keycap's chip is drawn with: white on dark, ink at 90% on light.
-        let (over, strength) = if light { (ink, 0.9) } else { (0xffffff, 1.) };
-        let muted = k.muted.unwrap_or_else(|| {
+        let mut c = Chrome {
+            ground,
+            card,
+            popover,
+            ink,
+            ..Chrome::default()
+        };
+        let sidebar_chip = legible::overlay(&c, KEYCAP_FILL + SIDEBAR_CHIP, card);
+        c.muted = k.muted.unwrap_or_else(|| {
             let passes = |m: u32| {
-                let keys = mix(ink, m, 0.5);
-                let sidebar_chip = mix(over, card, (KEYCAP_FILL + 0.08) * strength);
-                contrast(m, card).min(contrast(m, popover)) >= 4.5
-                    && contrast(keys, sidebar_chip) >= 4.5
+                contrast(m, card).min(contrast(m, popover)) >= TEXT
+                    && contrast(mix(ink, m, 0.5), sidebar_chip) >= TEXT
             };
             (55..=100)
                 .map(|percent| mix(ink, ground, percent as f32 / 100.))
@@ -216,51 +269,145 @@ impl ThemeSource {
                 .find(|&&(i, _)| i == index)
                 .map_or(GHOSTTY_16[index as usize], |&(_, color)| color)
         };
-        let pick = |keyed: Option<u32>, normal: u8| {
-            keyed.unwrap_or_else(|| {
+        // Step 1: of the pair, the one that stands out more from the popover, moved away from
+        // the ground until every contrast check on its slot passes.
+        for (slot, keyed, normal) in [
+            (Slot::Accent, k.accent, 4),
+            (Slot::Accent2, k.accent2, 5),
+            (Slot::Live, k.live, 2),
+            (Slot::Danger, k.danger, 1),
+            (Slot::Warning, k.warning, 3),
+        ] {
+            *slot.of(&mut c) = keyed.unwrap_or_else(|| {
                 let (a, b) = (palette(normal), palette(normal + 8));
-                if contrast(a, popover) >= contrast(b, popover) {
+                let base = if contrast(a, popover) >= contrast(b, popover) {
                     a
                 } else {
                     b
-                }
-            })
+                };
+                lighten(&c, slot, base).unwrap_or(base)
+            });
+        }
+        // Step 3: a grey has no hue to carry trouble.
+        let canonical = if light {
+            [
+                (Slot::Danger, k.danger, 0xc62828),
+                (Slot::Warning, k.warning, 0x9a6700),
+            ]
+        } else {
+            [
+                (Slot::Danger, k.danger, 0xff8a8a),
+                (Slot::Warning, k.warning, 0xf5d48a),
+            ]
         };
-        let accent = pick(k.accent, 4);
-        let on_accent = k.on_accent.unwrap_or_else(|| {
+        for (slot, keyed, color) in canonical {
+            if keyed.is_none() && hls::from_rgb(*slot.of(&mut c)).2 < GREY {
+                *slot.of(&mut c) = lighten(&c, slot, color).unwrap_or(color);
+            }
+        }
+        // Step 2: warning turns away from danger's hue until they are far enough apart.
+        if k.warning.is_none() && legible::hue_gap(c.warning, c.danger) < legible::HUE_GAP {
+            c.warning = turn_from_danger(&c);
+        }
+        let accent = c.accent;
+        c.on_accent = k.on_accent.unwrap_or_else(|| {
             [ground, ink]
                 .into_iter()
-                .find(|&c| contrast(c, accent) >= 4.5)
+                .find(|&color| contrast(color, accent) >= TEXT)
                 .unwrap_or(if contrast(0, accent) >= contrast(0xffffff, accent) {
                     0
                 } else {
                     0xffffff
                 })
         });
-        Derived {
-            chrome: Chrome {
-                ground,
-                card,
-                popover,
-                ink,
-                muted,
-                accent,
-                accent2: pick(k.accent2, 5),
-                live: pick(k.live, 2),
-                warning: pick(k.warning, 3),
-                danger: pick(k.danger, 1),
-                on_accent,
-                terminal_selection: t
-                    .selection_background
-                    .unwrap_or_else(|| mix(accent, ground, 0.3)),
-            },
-            terminal: t.clone(),
+        c.terminal_selection = t
+            .selection_background
+            .unwrap_or_else(|| mix(accent, ground, 0.3));
+        c
+    }
+}
+
+/// How far one step moves a lightness (out of 1), and how many steps a colour may take.
+const LIGHTNESS_STEP: f64 = 0.02;
+const LIGHTNESS_STEPS: u32 = 50;
+/// How many steps ink may lift.
+const INK_STEPS: u32 = 25;
+/// How far toward black (or white) one step moves the chrome ground, and how many it may take.
+const GROUND_STEP: f32 = 0.05;
+const GROUND_STEPS: u32 = 15;
+/// HLS saturation below which a trouble colour counts as grey.
+const GREY: f64 = 0.2;
+
+/// Which way is away from `ground` in lightness: up from a dark ground, down from a light one.
+fn away(ground: u32) -> f64 {
+    if is_light(ground) { -1. } else { 1. }
+}
+
+/// A status slot the derivation adjusts.
+#[derive(Clone, Copy)]
+enum Slot {
+    Accent,
+    Accent2,
+    Live,
+    Warning,
+    Danger,
+}
+
+impl Slot {
+    fn of(self, c: &mut ChromeColors) -> &mut u32 {
+        match self {
+            Slot::Accent => &mut c.accent,
+            Slot::Accent2 => &mut c.accent2,
+            Slot::Live => &mut c.live,
+            Slot::Warning => &mut c.warning,
+            Slot::Danger => &mut c.danger,
+        }
+    }
+
+    fn bit(self) -> u16 {
+        use legible::slot::*;
+        match self {
+            Slot::Accent => ACCENT,
+            Slot::Accent2 => ACCENT2,
+            Slot::Live => LIVE,
+            Slot::Warning => WARNING,
+            Slot::Danger => DANGER,
         }
     }
 }
 
-/// A keycap chip's fill over its surface; the chrome's `theme::KEYCAP_FILL`.
-const KEYCAP_FILL: f32 = 0.07;
+/// `color` with its lightness moved away from `c`'s ground, 2% at a time with hue and
+/// saturation kept, to the first lightness at which every contrast check on `slot` passes;
+/// `None` if none does.
+fn lighten(c: &ChromeColors, slot: Slot, color: u32) -> Option<u32> {
+    let (h, l, s) = hls::from_rgb(color);
+    let away = away(c.ground);
+    (0..=LIGHTNESS_STEPS)
+        .map(|i| hls::to_rgb(h, l + away * LIGHTNESS_STEP * i as f64, s))
+        .find(|&candidate| {
+            let mut c = *c;
+            *slot.of(&mut c) = candidate;
+            legible::slot_passes(&c, slot.bit())
+        })
+}
+
+/// `c`'s warning with its hue turned away from danger's, a degree at a time, until they are
+/// [`legible::HUE_GAP`] apart, then lightened as in step 1.
+fn turn_from_danger(c: &ChromeColors) -> u32 {
+    let (h, l, s) = hls::from_rgb(c.warning);
+    let danger = hls::from_rgb(c.danger).0;
+    let turn = if (h - danger).rem_euclid(1.) < 0.5 {
+        1.
+    } else {
+        -1.
+    };
+    (1..60)
+        .map(|degree| hls::to_rgb((h + turn * degree as f64 / 360.).rem_euclid(1.), l, s))
+        .find(|&turned| legible::hue_gap(turned, c.danger) >= legible::HUE_GAP)
+        .map_or(c.warning, |turned| {
+            lighten(c, Slot::Warning, turned).unwrap_or(turned)
+        })
+}
 
 /// Ghostty's default palette colours 0–15, for entries a file leaves out.
 const GHOSTTY_16: [u32; 16] = [
@@ -268,31 +415,8 @@ const GHOSTTY_16: [u32; 16] = [
     0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
 ];
 
-/// `a` over `b` at opacity `t`, mixed in sRGB as the chrome mixes.
-fn mix(a: u32, b: u32, t: f32) -> u32 {
-    let channel = |shift: u32| {
-        let (x, y) = (((a >> shift) & 0xff) as f32, ((b >> shift) & 0xff) as f32);
-        ((x * t + y * (1. - t)).round() as u32) << shift
-    };
-    channel(16) | channel(8) | channel(0)
-}
-
-/// WCAG 2 contrast ratio of two sRGB colours.
-fn contrast(a: u32, b: u32) -> f64 {
-    let luminance = |c: u32| {
-        let channel = |shift: u32| {
-            let v = ((c >> shift) & 0xff) as f64 / 255.;
-            if v <= 0.04045 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-    };
-    let (x, y) = (luminance(a), luminance(b));
-    (x.max(y) + 0.05) / (x.min(y) + 0.05)
-}
+mod hls;
+pub mod legible;
 
 mod remembered;
 pub use remembered::Remembered;
