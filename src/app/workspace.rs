@@ -12,8 +12,8 @@ use rex_rune::{
     connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
     layout::{Divider, shell_layout},
     settings::{
-        ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice, terminal::OptionSides,
-        validate_host,
+        ChromeChoice, ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice,
+        terminal::OptionSides, validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
@@ -194,6 +194,8 @@ pub struct Workspace {
     pub restart: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// What this launch's downloads have told the person, and what finished rows may offer.
     pub downloads: super::downloads::Downloads,
+    /// The theme source file, and what reading it last gave.
+    pub theme_source: super::theme_source::Follow,
 }
 
 #[derive(Default)]
@@ -257,10 +259,11 @@ impl Workspace {
         // A theme that can't be read leaves the setting alone: it applies again once its
         // file is back.
         let theme_dirs = ThemeDirs::from_env();
-        let palette = PaletteRef::from(palette_of(settings.chrome_theme));
+        let palette = PaletteRef::from(palette_of(settings.chrome_palette()));
+        let theme_source = super::theme_source::Follow::new(&settings);
         set_palette(palette.clone());
         let (term_theme, theme_error) =
-            match theme_dirs.resolve(&settings.terminal_theme, settings.chrome_theme) {
+            match theme_dirs.resolve(&settings.terminal_theme, settings.chrome_palette()) {
                 Ok(theme) => (theme, None),
                 Err(error) => (None, Some(error)),
             };
@@ -354,8 +357,13 @@ impl Workspace {
             updates: Default::default(),
             restart: Default::default(),
             downloads: Default::default(),
+            theme_source,
         };
         this.init_updates();
+        // Read at launch, so a change made while the client was closed wins.
+        if this.following_theme_source() {
+            this.load_theme_source();
+        }
         if let Some(error) = theme_error {
             this.notify(format!("{error:#}; following the server's colours"));
         }
@@ -1275,9 +1283,13 @@ impl Workspace {
     /// it; chrome palettes leave it alone from then on. Nothing changes when the theme can't
     /// be read.
     pub fn apply_theme(&mut self, choice: TerminalThemeChoice) -> anyhow::Result<()> {
-        self.term_theme = self
-            .theme_dirs
-            .resolve(&choice, self.settings.chrome_theme)?;
+        // Under Theme source, Follow chrome is the source's terminal theme once it was read.
+        self.term_theme = match self.source_terminal_theme() {
+            Some(theme) if choice == TerminalThemeChoice::FollowChrome => Some(theme),
+            _ => self
+                .theme_dirs
+                .resolve(&choice, self.settings.chrome_palette())?,
+        };
         self.settings.terminal_theme = choice;
         self.settings.terminal_theme_chosen = true;
         self.save();
@@ -1302,7 +1314,7 @@ impl Workspace {
             tx.instant();
             return;
         }
-        self.settings.chrome_theme = chrome;
+        self.settings.chrome_theme = chrome.into();
         self.use_palette(builtin, tx);
         if !self.settings.terminal_theme_chosen
             && self.settings.terminal_theme == TerminalThemeChoice::FollowServer
@@ -1326,7 +1338,7 @@ impl Workspace {
         }
     }
 
-    fn declare_theme(&mut self) {
+    pub(super) fn declare_theme(&mut self) {
         let args = self.declared_theme();
         for index in 0..self.hosts.len() {
             self.send(index, HostCommand::Theme(args.clone()));
@@ -1492,7 +1504,10 @@ impl Workspace {
             }
             Intent::Choose(index) => self.choose(index, tx),
             Intent::Chrome(chrome) => {
-                self.set_chrome(chrome, tx);
+                match chrome {
+                    ChromeChoice::Palette(chrome) => self.set_chrome(chrome, tx),
+                    ChromeChoice::ThemeSource => self.follow_theme_source(tx),
+                }
                 match self.settings_back() {
                     Some(back) => self.panel = Some(back),
                     None => self.close_panel(tx),

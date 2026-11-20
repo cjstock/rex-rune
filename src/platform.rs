@@ -18,6 +18,7 @@ pub fn init() {
     process::umask();
 }
 
+pub mod clock;
 pub mod dirs;
 pub mod downloads;
 pub mod fs;
@@ -27,3 +28,4 @@ pub mod net;
 #[cfg(unix)]
 pub mod process;
 pub mod tools;
+pub mod watch;

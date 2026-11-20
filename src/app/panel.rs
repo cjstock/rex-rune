@@ -4,7 +4,7 @@ use super::tabs::{TabAction, TabTarget};
 use super::theme::{MONITOR, SERVER};
 use super::workspace::Workspace;
 use rex_rune::{
-    settings::{ChromeTheme, TerminalThemeChoice},
+    settings::{ChromeChoice, ChromeTheme, TerminalThemeChoice},
     terminal_theme::{BUILTIN_PREFIX, BUILTINS, paired},
 };
 use rune::TextEdit;
@@ -66,8 +66,9 @@ pub enum Intent {
     Theme(TerminalThemeChoice),
     /// The chrome palette picker, from Settings.
     ChooseChrome,
-    /// Draw the chrome in this palette from now on, then return to Settings.
-    Chrome(ChromeTheme),
+    /// Draw the chrome in this palette, or follow the theme source, from now on, then return
+    /// to Settings.
+    Chrome(ChromeChoice),
     /// Open Settings → Updates.
     Updates,
     /// Trigger an immediate release metadata check.
@@ -680,7 +681,11 @@ impl Workspace {
         );
         add(
             "Follow chrome",
-            paired(self.settings.chrome_theme).name,
+            if self.following_theme_source() {
+                ChromeChoice::ThemeSource.name()
+            } else {
+                paired(self.settings.chrome_palette()).name
+            },
             "Built in",
             TerminalThemeChoice::FollowChrome,
         );
@@ -720,14 +725,27 @@ impl Workspace {
             return self.discovery_entries(&lower);
         }
         if matches!(panel.kind, PanelKind::Chromes) {
-            return ChromeTheme::ALL
+            let mut entries: Vec<Entry> = ChromeTheme::ALL
                 .into_iter()
                 .map(|chrome| {
-                    let mut e = Entry::new(chrome.name(), "", "", Intent::Chrome(chrome));
-                    e.current = chrome == self.settings.chrome_theme;
+                    let mut e = Entry::new(chrome.name(), "", "", Intent::Chrome(chrome.into()));
+                    e.current = self.settings.chrome_theme == chrome;
                     e
                 })
                 .collect();
+            // Left out where the platform can't follow a file.
+            if self.theme_source.available {
+                let source = ChromeChoice::ThemeSource;
+                let mut e = Entry::new(
+                    source.name(),
+                    self.theme_source_said().word,
+                    "",
+                    Intent::Chrome(source),
+                );
+                e.current = self.following_theme_source();
+                entries.push(e);
+            }
+            return entries;
         }
         if let PanelKind::Choice(choice) = &panel.kind {
             return choice

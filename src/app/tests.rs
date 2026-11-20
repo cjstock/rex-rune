@@ -76,6 +76,8 @@ mod tab_icon_tests;
 mod tab_tests;
 #[path = "terminal_settings_tests.rs"]
 mod terminal_settings_tests;
+#[path = "theme_source_tests.rs"]
+mod theme_source_tests;
 #[path = "title_row_tests.rs"]
 mod title_row_tests;
 #[path = "titles_tests.rs"]
@@ -3808,6 +3810,7 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
             ("Rosé Pine".to_owned(), false),
             ("Rosé Pine Moon".to_owned(), false),
             ("Gruvbox Dark".to_owned(), false),
+            ("Theme source".to_owned(), false),
         ]
     );
     let rose = rt
@@ -3854,10 +3857,10 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
     let saved = Settings::load(&rt.state.settings_path).unwrap();
     assert_eq!(
         (saved.chrome_theme, saved.terminal_theme_chosen),
-        (ChromeTheme::RosePine, false)
+        (ChromeTheme::RosePine.into(), false)
     );
 
-    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::GruvboxDark), tx));
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::GruvboxDark.into()), tx));
     for host in &hosts {
         assert_eq!(
             declared(host),
@@ -3871,7 +3874,7 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
     for host in &hosts {
         declared(host);
     }
-    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::RosePineMoon), tx));
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::RosePineMoon.into()), tx));
     assert_eq!(
         rt.state.settings.terminal_theme,
         TerminalThemeChoice::FollowServer,
@@ -3882,7 +3885,7 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
     let again = relaunch(&rt.state);
     assert_eq!(again.settings.chrome_theme, ChromeTheme::RosePineMoon);
     assert_eq!(again.term_colors().background, 0x232136);
-    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight), tx));
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight.into()), tx));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -3917,7 +3920,7 @@ fn a_runtime_palette_draws_the_chrome_and_terminal_bodies_and_is_freed_when_left
     assert_eq!(rt.state.settings.chrome_theme, ChromeTheme::Midnight);
 
     // Back to the saved choice: the runtime palette has no holder left.
-    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight), tx));
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight.into()), tx));
     rt.frame(1. / 60.);
     assert_eq!(window(&rt), rgb(0x001528));
     assert_eq!(rt.state.term_colors().background, 0x001528);

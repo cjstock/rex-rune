@@ -89,6 +89,15 @@ fn keywords(page: Page) -> &'static str {
     }
 }
 
+/// What people call a row whose label and helper don't say it. Found only where the row is
+/// built, so a row a platform leaves out is never a result.
+fn row_keywords(label: &str) -> &'static str {
+    match label {
+        "Theme source" => "follow dynamic wallpaper dms matugen material",
+        _ => "",
+    }
+}
+
 /// A page Back can return to, and how far down it was left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Stop {
@@ -407,7 +416,13 @@ fn search(index: &[Indexed], query: &str) -> Vec<Hit> {
         {
             continue;
         }
-        let more = format!("{} {} {}", found.helper, found.heading, found.page.title());
+        let more = format!(
+            "{} {} {} {}",
+            found.helper,
+            found.heading,
+            found.page.title(),
+            row_keywords(&found.label)
+        );
         if let Some(rank) = rank(&query, &words, &found.label, &more) {
             hits.push((
                 rank,
