@@ -19,3 +19,7 @@ _Avoid_: system theme, wallpaper theme, DMS theme
 **Owned pane**:
 A pane whose block this client owns on its server, or that no client owns; the only panes a declared terminal theme reaches.
 _Avoid_: attached pane, local pane
+
+**Theme source template**:
+The matugen template that ships with the client and makes DMS write the theme source every time it regenerates colours. The client installs it only when the user asks.
+_Avoid_: DMS theme, matugen config
