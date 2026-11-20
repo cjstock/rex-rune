@@ -1,6 +1,6 @@
 //! Theme source: choosing it, reading the file into the chrome and the declared terminal
 //! theme, leaving it, and what Settings says about it. Each test writes a real file in its own
-//! folder and delivers the read the file watcher will later trigger.
+//! folder and delivers the file watcher's wake (`read_theme_source`) once the file has settled.
 use super::*;
 use crate::app::{panel::SettingsSection, settings_kit::ChipTone, theme::rgb};
 use rex_rune::{
@@ -145,7 +145,7 @@ fn choosing_theme_source_draws_its_file_at_once_and_declares_it_to_every_host() 
         "the palette it replaced"
     );
 
-    // The read the watcher will deliver: a light file, light chrome, in one frame.
+    // The watcher's wake: a light file, light chrome, in one frame.
     std::fs::write(&file, LIGHT).unwrap();
     rt.update(|s, tx| s.read_theme_source(tx));
     rt.frame(1. / 60.);
@@ -206,7 +206,7 @@ fn a_broken_file_says_why_and_changes_nothing() {
             "version 2 is newer than this client reads",
         ),
     ] {
-        std::fs::write(&file, text).unwrap();
+        write_settled(&file, text);
         rt.update(|s, tx| s.read_theme_source(tx));
         rt.frame(1. / 60.);
         assert_eq!(
@@ -260,7 +260,7 @@ fn until_the_file_is_read_once_the_palette_from_before_stays_and_launch_reads_it
         [serde_json::to_value(TerminalTheme::gruvbox_dark().args()).unwrap()],
         "Follow chrome follows the palette still in use"
     );
-    std::fs::write(&file, "background = #000000\n").unwrap();
+    write_settled(&file, "background = #000000\n");
     rt.update(|s, tx| s.read_theme_source(tx));
     assert_eq!(
         said(&rt).2,
@@ -345,7 +345,7 @@ fn the_row_says_found_applied_and_where_the_file_is() {
     );
 
     std::fs::write(&file, DARK).unwrap();
-    // Settings looks again when it is next drawn (the watcher will wake it).
+    // Settings looks again when it is next drawn.
     rt.update(|_, _| {});
     settle(&mut rt);
     assert_eq!(
@@ -471,10 +471,187 @@ fn theme_source_settings_draw() {
         rt.update(|s, tx| s.read_theme_source(tx));
         settle(&mut rt);
         camera.snap(&mut rt, &format!("theme-source-light{suffix}"));
-        std::fs::write(&file, "foreground = #ffffff\n").unwrap();
+        write_settled(&file, "foreground = #ffffff\n");
         rt.update(|s, tx| s.read_theme_source(tx));
         settle(&mut rt);
         camera.snap(&mut rt, &format!("theme-source-cant-read{suffix}"));
         rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight.into()), tx));
     }
+}
+
+/// Make `file`'s last change older than the watcher's settle window, as it is by the time a
+/// wake reads it: nothing is still writing it.
+fn settled(file: &std::path::Path) {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_modified(then)
+        .unwrap();
+}
+
+/// Write `text` and let it settle.
+fn write_settled(file: &std::path::Path, text: &str) {
+    std::fs::write(file, text).unwrap();
+    settled(file);
+}
+
+/// One window following `DARK`, with what choosing it declared already taken.
+fn following_dark() -> (
+    Runtime<Workspace>,
+    flume::Receiver<HostCommand>,
+    std::path::PathBuf,
+) {
+    let (ws, mut hosts, file) = source_workspace(1);
+    write_settled(&file, DARK);
+    let mut rt = runtime(ws);
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeChoice::ThemeSource), tx));
+    rt.frame(1. / 60.);
+    let host = hosts.remove(0);
+    assert_eq!(told(&host), [dark_args()]);
+    (rt, host, file)
+}
+
+/// The watcher's wake as it arrives on the UI thread, then one frame.
+fn wake(rt: &mut Runtime<Workspace>) {
+    rt.update(|s, tx| s.read_theme_source(tx));
+    rt.frame(1. / 60.);
+}
+
+/// The notices that speak of the theme source.
+fn source_notices(rt: &Runtime<Workspace>) -> Vec<String> {
+    rt.state
+        .notices
+        .iter()
+        .filter(|n| n.text.contains("theme source"))
+        .map(|n| n.text.clone())
+        .collect()
+}
+
+fn leave(rt: &mut Runtime<Workspace>) {
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight.into()), tx));
+}
+
+#[test]
+fn a_wake_after_a_change_applies_it_in_one_frame() {
+    let (mut rt, host, file) = following_dark();
+    write_settled(&file, LIGHT);
+    wake(&mut rt);
+    assert_eq!(window(&rt), rgb(0xfafafa), "in one frame, without a spring");
+    assert_eq!(told(&host).len(), 1, "declared once");
+    assert_eq!(rt.state.term_colors().background, 0xfafafa);
+    leave(&mut rt);
+}
+
+#[test]
+fn a_wake_with_the_same_contents_does_nothing_and_declares_nothing() {
+    let (mut rt, host, file) = following_dark();
+    let before = rt.state.theme_source.status.clone();
+    // Rewritten with the same bytes, as matugen does on every run.
+    write_settled(&file, DARK);
+    wake(&mut rt);
+    assert!(told(&host).is_empty(), "no theme command");
+    assert_eq!(
+        rt.state.theme_source.status, before,
+        "not applied again: the time it was applied stays"
+    );
+    leave(&mut rt);
+}
+
+#[test]
+fn an_empty_or_partial_file_still_being_written_is_not_yet() {
+    let (mut rt, host, file) = following_dark();
+    let before = rt.state.theme_source.status.clone();
+    for text in ["", "rex-rune-theme-source = 1\nbackground = #1e1e2e\n"] {
+        // Changed just now: the writer may not be done.
+        std::fs::write(&file, text).unwrap();
+        wake(&mut rt);
+        assert_eq!(
+            rt.state.theme_source.status, before,
+            "{text:?}: not reported"
+        );
+        assert!(source_notices(&rt).is_empty(), "{text:?}: no notice");
+        assert!(told(&host).is_empty());
+        assert_eq!(window(&rt), rgb(0x1e1e2e));
+    }
+    // Still partial once it has settled: now it is broken.
+    settled(&file);
+    wake(&mut rt);
+    assert_eq!(said(&rt).0, "Can't read");
+    assert_eq!(source_notices(&rt).len(), 1);
+    leave(&mut rt);
+}
+
+#[test]
+fn going_bad_says_so_once_and_recovering_says_nothing() {
+    let (mut rt, host, file) = following_dark();
+    write_settled(&file, "foreground = #ffffff\n");
+    wake(&mut rt);
+    assert_eq!(
+        source_notices(&rt),
+        ["Can't read the theme source: it has no background colour; the last colours stay"]
+    );
+    assert_eq!(window(&rt), rgb(0x1e1e2e), "the last good theme stays");
+    assert!(told(&host).is_empty());
+
+    // Still bad, differently: no second notice.
+    write_settled(&file, "this is not a theme\n");
+    wake(&mut rt);
+    assert_eq!(
+        said(&rt).2,
+        "Can't read it: it has no theme; the last colours stay."
+    );
+    assert_eq!(source_notices(&rt).len(), 1, "{:?}", source_notices(&rt));
+
+    // Good again: applied without a word, and the notice is gone.
+    write_settled(&file, LIGHT);
+    wake(&mut rt);
+    assert_eq!(window(&rt), rgb(0xfafafa));
+    assert_eq!(told(&host).len(), 1);
+    assert!(source_notices(&rt).is_empty(), "{:?}", source_notices(&rt));
+
+    // Bad again after good: one notice again.
+    write_settled(&file, "background = #000000\n");
+    wake(&mut rt);
+    assert_eq!(source_notices(&rt).len(), 1);
+    leave(&mut rt);
+}
+
+#[test]
+fn deleting_the_file_keeps_the_last_good_theme() {
+    let (mut rt, host, file) = following_dark();
+    std::fs::remove_file(&file).unwrap();
+    wake(&mut rt);
+    assert_eq!(window(&rt), rgb(0x1e1e2e));
+    assert_eq!(rt.state.term_colors().background, 0x1e1e2e);
+    assert!(told(&host).is_empty(), "nothing declared");
+    assert_eq!(said(&rt).2, "Not found; the last colours stay.");
+    assert_eq!(
+        source_notices(&rt),
+        ["The theme source is gone; the last colours stay"]
+    );
+    // Back with the same colours: nothing to declare, nothing said.
+    write_settled(&file, DARK);
+    wake(&mut rt);
+    assert!(told(&host).is_empty());
+    assert_eq!(said(&rt).0, "Applied");
+    assert!(source_notices(&rt).is_empty());
+    leave(&mut rt);
+}
+
+#[test]
+fn the_file_is_watched_only_while_following_it() {
+    let (ws, _hosts, file) = source_workspace(1);
+    write_settled(&file, DARK);
+    let mut rt = runtime(ws);
+    assert_eq!(rt.state.theme_source.watching(), None, "not following");
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeChoice::ThemeSource), tx));
+    let expected = rex_rune::platform::watch::AVAILABLE.then_some(file.as_path());
+    assert_eq!(rt.state.theme_source.watching(), expected);
+    let again = relaunch(&rt.state);
+    assert_eq!(again.theme_source.watching(), expected, "from launch");
+    drop(again);
+    leave(&mut rt);
+    assert_eq!(rt.state.theme_source.watching(), None, "left");
 }

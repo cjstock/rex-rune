@@ -104,11 +104,23 @@ pub enum Read {
 
 /// Read the theme source at `path` and derive what it gives.
 pub fn read(path: &Path) -> Read {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Missing,
-        Err(error) => return Read::Unreadable(error.kind().to_string()),
-    };
+    match std::fs::read(path) {
+        Ok(bytes) => decode(bytes),
+        Err(error) => unread(&error),
+    }
+}
+
+/// What a theme source that could not be read gives: for a follower that reads the bytes
+/// itself, to compare them before deriving them ([`decode`]).
+pub fn unread(error: &std::io::Error) -> Read {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => Read::Missing,
+        kind => Read::Unreadable(kind.to_string()),
+    }
+}
+
+/// What a theme source's bytes give.
+pub fn decode(bytes: Vec<u8>) -> Read {
     let Ok(text) = String::from_utf8(bytes) else {
         return Read::Unreadable("it isn't text".into());
     };
