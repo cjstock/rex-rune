@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal Chrome Renders</title>
+<style>
+/* PROTOTYPE viewer: serve this folder (python3 -m http.server) and flip through the renders. */
+:root { --bg:#f4f6f8; --panel:#fff; --fg:#15191d; --muted:#5a6470; --line:#d8dee4; --accent:#1f6feb; --bad:#b42318; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0e1215; --panel:#161b20; --fg:#e6ebf0; --muted:#96a2ae; --line:#2a323a; --accent:#6aa8ff; --bad:#ff8a80; color-scheme:dark } }
+:root[data-theme="dark"] { --bg:#0e1215; --panel:#161b20; --fg:#e6ebf0; --muted:#96a2ae; --line:#2a323a; --accent:#6aa8ff; --bad:#ff8a80; color-scheme:dark }
+body { background:var(--bg); color:var(--fg); font:14px system-ui, sans-serif; margin:0; padding:16px; }
+h1 { font-size:18px; margin:0 0 4px } p { color:var(--muted); margin:0 0 12px; max-width:75ch }
+.controls { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px }
+select, button { font:13px system-ui; padding:5px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--fg) }
+button[aria-pressed="true"] { background:var(--accent); color:var(--panel) }
+.main { display:grid; grid-template-columns:minmax(0,1fr) 280px; gap:16px; align-items:start }
+@media (max-width:900px) { .main { grid-template-columns:minmax(0,1fr) } }
+img { width:100%; border:1px solid var(--line); border-radius:8px; display:block }
+aside { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12px }
+.tok { display:grid; grid-template-columns:22px 1fr auto; gap:8px; align-items:center; margin:3px 0 }
+.sw { width:22px; height:16px; border-radius:4px; border:1px solid var(--line) }
+code { font:11px ui-monospace, monospace; color:var(--muted) } .bad { color:var(--bad) }
+</style>
+<h1>Chrome palettes derived from terminal themes</h1>
+<p>PROTOTYPE for “Deriving a chrome palette from a terminal theme”. Each chrome palette below is derived by <code>derive.py</code> from a theme source file in <code>sources/</code>. The panes show that file as their Ghostty theme.</p>
+<div class="controls"><select id="theme"></select><span id="screens"></span></div>
+<div class="main"><img id="shot" alt=""><aside id="side"></aside></div>
+<script>
+const SCREENS = ["workspace", "commands", "settings", "confirm"];
+let data = {}, screen = "workspace";
+const $ = id => document.getElementById(id);
+function show() {
+  const name = $("theme").value, d = data[name];
+  $("shot").src = `shots/${name}.${screen}.png`; $("shot").alt = `${name}, ${screen}`;
+  $("side").innerHTML = `<b>${name}</b> · ${d.mode}<br><br>` +
+    Object.entries(d.tokens).map(([k, v]) => `<div class="tok"><span class="sw" style="background:${v}"></span>${k}<code>${v}</code></div>`).join("") +
+    `<br><b>Adjustments</b><br>${d.notes.join("<br>") || "none"}<br><br><b>Checks</b><br>${d.fails.length ? d.fails.map(f => `<span class="bad">${f}</span>`).join("<br>") : "all pass"}`;
+  document.querySelectorAll("#screens button").forEach(b => b.setAttribute("aria-pressed", b.textContent === screen));
+}
+fetch("palettes.json").then(r => r.json()).then(j => {
+  data = j;
+  for (const n of Object.keys(j)) $("theme").add(new Option(n, n));
+  for (const s of SCREENS) { const b = document.createElement("button"); b.textContent = s; b.onclick = () => { screen = s; show(); }; $("screens").append(b); }
+  $("theme").onchange = show; show();
+});
+</script>

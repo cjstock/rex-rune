@@ -1,0 +1,15 @@
+# PROTOTYPE: plain matugen (no dank16), current desktop scheme, dark
+scheme = dark
+background = #130d09
+foreground = #fceee5
+cursor-color = #faae66
+selection-background = #d8914c
+selection-foreground = #fceee5
+chrome-ground = #130d09
+chrome-card = #130d09
+chrome-popover = #261e18
+chrome-ink = #fceee5
+chrome-muted = #b4a9a1
+chrome-accent = #faae66
+chrome-accent2 = #fffbce
+chrome-on-accent = #5a3000

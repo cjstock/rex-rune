@@ -164,6 +164,22 @@ fn proto_palette() -> Option<&'static Palette> {
         };
         let map = std::env::var("REX_PROTO_MAP").unwrap_or_else(|_| "A".into());
         let p = match map.as_str() {
+            // T (terminal-chrome prototype): the JSON already names every slot, from derive.py.
+            "T" => Palette {
+                ground: c("ground"),
+                card: c("card"),
+                popover: c("popover"),
+                ink: c("ink"),
+                muted: c("muted"),
+                accent: c("accent"),
+                accent2: c("accent2"),
+                live: c("live"),
+                warning: c("warning"),
+                danger: c("danger"),
+                on_accent: c("on_accent"),
+                terminal_selection: c("terminal_selection"),
+                kit: OnceLock::new(),
+            },
             // A: M3 as specified. Surface ground, container-high popovers, error for danger.
             "A" => Palette {
                 ground: c("surface"),

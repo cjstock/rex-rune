@@ -1,0 +1,8 @@
+rule raw        dark: 336/637 fail, 0 warning changed, 0 ink lifted  light: 167/182 fail, 0 warning changed, 0 ink lifted
+    {'muted/card': 340, 'keycaps/sidebar': 262, 'keycap/sel': 230, 'keycaps/popover': 198, 'keycap/dsel': 195, 'warn~danger hue': 168, 'on_accent/accent': 98, 'warning/popover': 78, 'ink/sel': 76, 'ink/dsel': 67, 'warning/card': 63, 'dsel': 57, 'danger/popover': 57, 'sel': 56, 'ink/popover': 34, 'danger/card': 33}
+rule nolift     dark: 214/637 fail, 135 warning changed, 0 ink lifted  light: 24/182 fail, 29 warning changed, 0 ink lifted
+    {'keycap/sel': 230, 'keycap/dsel': 195, 'keycaps/sidebar': 81, 'ink/sel': 76, 'ink/dsel': 68, 'keycaps/popover': 54, 'ink/popover': 34, 'dsel': 32, 'danger/popover': 32, 'muted/card': 25, 'danger/card': 19, 'sel': 18}
+rule R          dark: 0/637 fail, 135 warning changed, 212 ink lifted  light: 0/182 fail, 29 warning changed, 24 ink lifted
+    {}
+rule cursor     dark: 20/637 fail, 135 warning changed, 209 ink lifted  light: 1/182 fail, 29 warning changed, 26 ink lifted
+    {'keycap/sel': 20, 'keycap/dsel': 20, 'ink/sel': 10, 'ink/dsel': 8, 'keycaps/sidebar': 7, 'keycaps/popover': 5, 'dsel': 4, 'danger/popover': 4, 'danger/card': 3, 'ink/popover': 2, 'sel': 2, 'muted/card': 1}
