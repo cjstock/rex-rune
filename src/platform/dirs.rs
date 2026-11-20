@@ -53,6 +53,27 @@ pub fn state() -> PathBuf {
     state_base().join(APP)
 }
 
+/// `$XDG_CONFIG_HOME`, else `~/.config`, on every platform: where tools that keep to the XDG
+/// layout wherever they run (DMS, matugen) keep their configuration.
+pub fn xdg_config() -> PathBuf {
+    xdg_base("XDG_CONFIG_HOME", ".config")
+}
+
+/// `$XDG_DATA_HOME`, else `~/.local/share`, on every platform: where this client keeps the
+/// files it hands to such tools.
+pub fn xdg_data() -> PathBuf {
+    xdg_base("XDG_DATA_HOME", ".local/share")
+}
+
+/// An XDG base folder: the variable when it is absolute, as the specification asks, else its
+/// default under home.
+fn xdg_base(var: &str, default: &str) -> PathBuf {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home().join(default))
+}
+
 /// Where this user's SSH tunnel sockets live, one folder per process.
 #[cfg(unix)]
 pub fn runtime() -> PathBuf {

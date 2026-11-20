@@ -652,7 +652,7 @@ pub(crate) fn paper() -> Palette {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -727,7 +727,7 @@ mod tests {
     }
 
     /// The checks every chrome palette passes, built in or not.
-    fn assert_legible(name: &str, p: &Palette) {
+    pub(in crate::app) fn assert_legible(name: &str, p: &Palette) {
         assert!(contrast(p.muted, p.card) >= 4.5, "{name}: muted on card");
         assert!(contrast(p.ink, p.popover) >= 4.5, "{name}: ink on popover");
         // Keycaps: on a popover's rows, and on the sidebar's search chip (itself an 8%

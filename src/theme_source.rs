@@ -29,10 +29,7 @@ pub const FILE_NAME: &str = "theme-source";
 /// Where the theme source is read from: `setting` (absolute, or starting with `~`) when given,
 /// else `theme-source` in this client's state folder (`$XDG_STATE_HOME/rex-rune`).
 pub fn path(setting: Option<&str>) -> PathBuf {
-    match setting.map(str::trim).filter(|path| !path.is_empty()) {
-        Some(path) => crate::download::store::expand_home(path),
-        None => crate::platform::dirs::state().join(FILE_NAME),
-    }
+    dms::Places::from_env().theme_source(setting)
 }
 
 /// The chrome palette's slots. `Chrome<u32>` is a palette's colours; `Chrome<Option<u32>>` the
@@ -294,6 +291,7 @@ fn contrast(a: u32, b: u32) -> f64 {
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
+pub mod dms;
 mod remembered;
 pub use remembered::Remembered;
 

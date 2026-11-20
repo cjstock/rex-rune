@@ -74,15 +74,21 @@ fn interface(s: &Workspace) -> El {
         "Terminals take the matching theme until you choose one.",
         value_popup("chrome-theme", chrome, Intent::ChooseChrome),
     )];
+    // DMS is installed and its drop-in is not the one this client would write.
+    let offer_dms = source.is_some() && s.theme_source.dms_offered();
     if let Some(said) = &source {
-        appearance.push(
-            setting(
-                "Theme source",
-                &said.sentence,
-                state_chip("theme-source-state", said.word, said.tone, ""),
-            )
-            .key("theme-source"),
-        );
+        let mut control = row().gap(8.).center_y().child(state_chip(
+            "theme-source-state",
+            said.word,
+            said.tone,
+            "",
+        ));
+        if offer_dms {
+            control = control.child(button("set-up-dms", "Set up DMS", Pill::Neutral, |s, _| {
+                s.set_up_dms()
+            }));
+        }
+        appearance.push(setting("Theme source", &said.sentence, control).key("theme-source"));
     }
     let mut appearance_notes = Vec::new();
     if source.is_some() {
@@ -96,6 +102,24 @@ fn interface(s: &Workspace) -> El {
         appearance_notes.push(
             mono_footnote(super::downloads::tilde(&s.theme_source.path))
                 .key("theme-source-path")
+                .mt(-6.),
+        );
+    }
+    // Named while it can be written, and while it is there as the client wrote it.
+    if offer_dms
+        || (source.is_some()
+            && s.theme_source.drop_in() == rex_rune::theme_source::dms::DropIn::Current)
+    {
+        appearance_notes.push(
+            footnote(
+                "Set up DMS adds this drop-in, so DMS writes that file whenever it changes \
+                 colours; delete it to stop:",
+            )
+            .key("dms-note"),
+        );
+        appearance_notes.push(
+            mono_footnote(super::downloads::tilde(&s.theme_source.places.drop_in()))
+                .key("dms-path")
                 .mt(-6.),
         );
     }
