@@ -8,16 +8,26 @@
 //! reported. Going from good to broken or missing posts one notice, taken back silently once
 //! the file is good again; meanwhile the last good theme stays. The derivation itself is the
 //! library's ([`rex_rune::theme_source`]); hosts only ever see the resulting theme command.
+//!
+//! Set up DMS ([`Workspace::set_up_dms`]) writes the theme source template and the DMS
+//! drop-in ([`rex_rune::theme_source::dms`]) when pressed, and only then; the row then waits
+//! for DMS's next run, or says DMS writes a different file once the path no longer matches.
 use super::{
     settings_kit::ChipTone,
     theme::{Palette, PaletteRef, set_palette},
     workspace::Workspace,
 };
 use rex_rune::{
-    platform::watch::{self, Watch},
+    platform::{
+        tools::Search,
+        watch::{self, Watch},
+    },
     settings::{ChromeChoice, Settings, TerminalThemeChoice},
     terminal_theme::{TerminalTheme, paired},
-    theme_source::{self, Derived, Read, Remembered},
+    theme_source::{
+        self, Derived, Read, Remembered,
+        dms::{self, DropIn, Places},
+    },
 };
 use rune::Tx;
 use std::{
@@ -45,6 +55,27 @@ pub struct Follow {
     bad_notice: Option<u64>,
     /// The file being followed, while the entry is chosen.
     watch: Option<(PathBuf, Watch)>,
+    /// Home, the XDG folders and the tool search Set up DMS uses: the person's, or a test
+    /// window's own under its folder.
+    pub places: Places,
+    /// Set up DMS was pressed and the file has not given a theme since.
+    waiting: bool,
+}
+
+/// A test window's home, XDG folders and tool search, all under its own `folder`, so no test
+/// reads or writes the person's, or finds their `dms`.
+fn private_places(folder: &Path) -> Places {
+    let home = folder.join("home");
+    Places {
+        data: home.join(".local/share"),
+        config: home.join(".config"),
+        state: home.join(".local/state/rex-rune"),
+        tools: Search {
+            path: Some(folder.join("bin").into_os_string()),
+            user_bin: home.join(".local/bin"),
+        },
+        home,
+    }
 }
 
 /// What the last reading found.
@@ -74,22 +105,29 @@ impl Follow {
     /// `settings_path` is where settings are saved; a test window's folder also holds its
     /// remembered theme.
     pub fn new(settings: &Settings, settings_path: &Path) -> Self {
-        // Tests never look at the person's own state folder: without a path of their own,
-        // theirs is one that can't exist.
-        let path = match settings.theme_source.path.as_deref() {
-            None if cfg!(test) => PathBuf::from("/nonexistent/rex-test/theme-source"),
-            path => theme_source::path(path),
+        let folder = settings_path.parent().unwrap_or(Path::new(""));
+        let places = if cfg!(test) {
+            private_places(folder)
+        } else {
+            Places::from_env()
         };
+        // A newer client's template replaces the one an older one wrote; the drop-in waits
+        // for the button.
+        if let Err(error) = dms::refresh_template(&places) {
+            eprintln!(
+                "Could not refresh the theme source template at {} ({error}).",
+                places.template().display()
+            );
+        }
         Self {
-            path,
+            path: places.theme_source(settings.theme_source.path.as_deref()),
+            places,
+            waiting: false,
             available: cfg!(test) || rex_rune::platform::watch::AVAILABLE,
             status: None,
             good: None,
             remembered: Remembered::in_folder(&if cfg!(test) {
-                settings_path
-                    .parent()
-                    .unwrap_or(Path::new(""))
-                    .to_path_buf()
+                folder.to_path_buf()
             } else {
                 rex_rune::platform::dirs::state()
             }),
@@ -102,6 +140,27 @@ impl Follow {
     /// The file being followed as it changes, if any.
     pub fn watching(&self) -> Option<&Path> {
         self.watch.as_ref().map(|(path, _)| path.as_path())
+    }
+
+    /// The file is the client's own default in its state folder, not a path the person set:
+    /// the client may make its folder.
+    fn own_folder(&self) -> bool {
+        self.path == self.places.theme_source(None)
+    }
+
+    /// The DMS drop-in as it is now, for this file.
+    pub fn drop_in(&self) -> DropIn {
+        dms::drop_in(&self.places, &self.path)
+    }
+
+    /// DMS is installed and its drop-in is missing or not what this client would write now.
+    pub fn dms_offered(&self) -> bool {
+        self.available
+            && matches!(
+                self.drop_in(),
+                DropIn::Missing | DropIn::Stale | DropIn::WritesElsewhere(_)
+            )
+            && self.places.dms()
     }
 }
 
@@ -214,6 +273,17 @@ impl Workspace {
         let Some(path) = wanted else {
             return;
         };
+        // A folder is watched, so it must be there before its file is. The client's own is
+        // made here; a folder the person named is theirs to make.
+        if self.theme_source.own_folder()
+            && let Some(folder) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(folder)
+        {
+            eprintln!(
+                "Could not make the theme source's folder {} ({error}).",
+                folder.display()
+            );
+        }
         let handle = self.handle.clone();
         match watch::file(&path, move || {
             handle.update(|s, tx| s.read_theme_source(tx));
@@ -235,6 +305,7 @@ impl Workspace {
         let status = match read {
             Read::Theme(derived) => {
                 self.theme_source.good = Some(derived.into());
+                self.theme_source.waiting = false;
                 Status::Applied(SystemTime::now())
             }
             Read::Missing => Status::Missing,
@@ -291,6 +362,21 @@ impl Workspace {
             .map(|good| good.terminal.clone())
     }
 
+    /// Set up DMS, pressed: write the theme source template and the DMS drop-in that points
+    /// it at this file, make the file's folder when it is the client's own, and wait for DMS
+    /// to run. DMS is never asked to; its next colour change writes the file.
+    pub fn set_up_dms(&mut self) {
+        let follow = &self.theme_source;
+        match dms::set_up(&follow.places, &follow.path, follow.own_folder()) {
+            Ok(()) => {
+                self.theme_source.waiting = true;
+                // Its folder may be new: follow the file now if that failed before.
+                self.watch_theme_source();
+            }
+            Err(error) => self.notify(format!("Couldn't set up DMS: {error}")),
+        }
+    }
+
     /// The Theme source row's chip and sentence.
     pub fn theme_source_said(&self) -> Said {
         let said = |word, tone, sentence: String| Said {
@@ -298,11 +384,25 @@ impl Workspace {
             tone,
             sentence,
         };
-        let status = self
-            .theme_source
-            .status
-            .as_ref()
-            .filter(|_| self.following_theme_source());
+        let follow = &self.theme_source;
+        if matches!(follow.drop_in(), DropIn::WritesElsewhere(_)) && follow.places.dms() {
+            return said(
+                "Other file",
+                ChipTone::Attention,
+                "DMS writes a different file; Set up DMS points it here.".into(),
+            );
+        }
+        let following = self.following_theme_source();
+        // Set up, and DMS hasn't written a theme yet: following, until the file gives one;
+        // otherwise until there is a file.
+        if follow.waiting && (following || !follow.path.is_file()) {
+            return said(
+                "Waiting",
+                ChipTone::Off,
+                "Waiting for DMS: change the wallpaper or switch light and dark.".into(),
+            );
+        }
+        let status = follow.status.as_ref().filter(|_| following);
         let Some(status) = status else {
             return if self.theme_source.path.is_file() {
                 said(

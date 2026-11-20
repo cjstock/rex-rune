@@ -4,7 +4,10 @@
 //! On macOS `tailscale` and `rex` ship inside their apps, not in a folder `PATH` names:
 //! the Tailscale app's own program answers as the CLI, and the Rex app carries its server
 //! and CLI as a helper.
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 /// Where a Mac app keeps `name`, in the order they are tried. Empty for any other tool
 /// and on every other platform.
@@ -31,22 +34,57 @@ pub fn bundled(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Where a tool is looked for: the folders of a `PATH`, then the user's own bin folder, then
+/// the copy inside its app. A test makes its own, so it never finds the person's tools.
+#[derive(Clone, Debug)]
+pub struct Search {
+    /// A `PATH`'s value.
+    pub path: Option<OsString>,
+    /// `$XDG_BIN_HOME`, else `~/.local/bin`, which a desktop launch often leaves off `PATH`.
+    pub user_bin: PathBuf,
+}
+
+impl Search {
+    /// The search this process's environment describes.
+    pub fn from_env() -> Self {
+        Self {
+            path: std::env::var_os("PATH"),
+            user_bin: std::env::var_os("XDG_BIN_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| super::dirs::home().join(".local/bin")),
+        }
+    }
+
+    /// Whether a folder of the `PATH` holds `name`.
+    pub fn on_path(&self, name: &str) -> bool {
+        self.path
+            .as_ref()
+            .is_some_and(|path| std::env::split_paths(path).any(|dir| dir.join(name).is_file()))
+    }
+
+    /// Where `name` is when the `PATH` does not have it: the user's bin folder, then its app.
+    pub fn off_path(&self, name: &str) -> Option<PathBuf> {
+        Some(self.user_bin.join(name))
+            .filter(|path| path.is_file())
+            .or_else(|| bundled(name))
+    }
+
+    /// Whether `name` is installed anywhere this search looks.
+    pub fn finds(&self, name: &str) -> bool {
+        self.on_path(name) || self.off_path(name).is_some()
+    }
+}
+
 /// Whether a folder of `PATH` holds `name`.
 pub fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+    Search::from_env().on_path(name)
 }
 
 /// Where `name` is when `PATH` does not have it: the user's own bin folder
 /// (`$XDG_BIN_HOME`, else `~/.local/bin`), which a desktop launch often leaves off `PATH`,
 /// then the copy inside its app.
 pub fn off_path(name: &str) -> Option<PathBuf> {
-    let user_bin = std::env::var_os("XDG_BIN_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| super::dirs::home().join(".local/bin"));
-    Some(user_bin.join(name))
-        .filter(|path| path.is_file())
-        .or_else(|| bundled(name))
+    Search::from_env().off_path(name)
 }
 
 /// What to run for `name`: the name itself when `PATH` has it, else [`off_path`], else the

@@ -643,7 +643,7 @@ pub(crate) fn paper() -> Palette {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -675,7 +675,7 @@ mod tests {
 
     /// The checks every chrome palette passes, built in or derived: the library's, which the
     /// derivation adjusts its slots against.
-    fn assert_legible(name: &str, p: &Palette) {
+    pub(in crate::app) fn assert_legible(name: &str, p: &Palette) {
         let colors = rex_rune::theme_source::ChromeColors {
             ground: p.ground,
             card: p.card,
