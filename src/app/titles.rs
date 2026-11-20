@@ -25,7 +25,7 @@ pub fn titles(s: &Workspace) -> El {
                     .on_toggle_tx(|s: &mut Workspace, tx: &mut Tx| {
                         s.prefer_generated_titles(!s.generated_titles(), tx)
                     })
-                    .build(kit())
+                    .build(&kit())
                     .key("generated-titles"),
             )]),
             footnote(

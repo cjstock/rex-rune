@@ -51,7 +51,7 @@ fn folder_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// The Download from <host> dialog: ask, wait for Rex, question, or an error before any bytes.
 pub fn dialog(s: &Workspace, d: &Dialog) -> El {
     let panel = s.panel.as_ref().expect("download panel");
-    let k = kit();
+    let k = &kit();
     let host = panel
         .target
         .as_ref()

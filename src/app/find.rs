@@ -398,7 +398,7 @@ pub fn bar(
                     search_key(s, &k3, ev, tx)
                 })
                 .width(None)
-                .build(kit())
+                .build(&kit())
                 .key(format!("search-field:{block}"))
                 .grow(1.)
                 .min_w(0.),

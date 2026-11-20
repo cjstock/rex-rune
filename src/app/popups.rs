@@ -220,7 +220,7 @@ fn activity_view(s: &Workspace) -> El {
 }
 
 pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
-    let k = kit();
+    let k = &kit();
     let panel = s.panel.as_ref().expect("list panel");
     let sessions = matches!(panel.kind, PanelKind::Picker(true) | PanelKind::Hosts(_));
     // Context menus (a pane's, a tab's, a sidebar session's) share one shape.
@@ -794,7 +794,7 @@ fn rename_row(edit: &TextEdit, height: f32, current: bool, surface: &str) -> El 
                 .on_edit(|s: &mut Workspace| s.rename_input())
                 .on_key(rename_key)
                 .width(None)
-                .build(kit())
+                .build(&kit())
                 .key("session-rename")
                 // The field's own inset, so the name stays where the row's label was.
                 .ml(-8.)

@@ -91,7 +91,7 @@ fn resize_band(e: WindowEdge) -> El {
 }
 
 pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
-    set_palette(palette_of(s.settings.chrome_theme));
+    set_palette(s.palette.clone());
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
     let maximized = cx.window_maximized();

@@ -74,7 +74,7 @@ pub(super) fn title(t: &str) -> El {
 
 fn form(s: &Workspace, form: &Form) -> El {
     let panel = s.panel.as_ref().expect("form panel");
-    let k = kit();
+    let k = &kit();
     let mut body = col().gap(12.).child(title(&panel.title));
     for (i, edit) in panel.inputs.iter().enumerate() {
         let (label, placeholder) = &panel.fields[i];

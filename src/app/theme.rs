@@ -3,7 +3,7 @@
 use rex_rune::settings::ChromeTheme;
 use rune::{Color, El, Icon, Shadow, Spring, SpringPair, TextStyle, Transition};
 use rune_kit::{Kit, PaletteFocus, PaletteSeed};
-use std::sync::OnceLock;
+use std::{cell::RefCell, rc::Rc, sync::OnceLock};
 
 /// sRGB `0xRRGGBB` → linear `Color`.
 pub fn rgb(value: u32) -> Color {
@@ -25,11 +25,13 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     channel(16) | channel(8) | channel(0)
 }
 
+/// A light overlay at `a` on the active palette's ground: see [`Palette::white`].
 pub fn white(a: f32) -> Color {
-    Color::WHITE.alpha(a)
+    with_palette(|p| p.white(a))
 }
+/// A shadow at `a` on the active palette's ground: see [`Palette::black`].
 pub fn black(a: f32) -> Color {
-    Color::BLACK.alpha(a)
+    with_palette(|p| p.black(a))
 }
 pub fn shadow(x: f32, y: f32, blur: f32, color: Color) -> Shadow {
     Shadow {
@@ -140,7 +142,7 @@ pub static GRUVBOX_DARK: Palette = Palette {
     kit: OnceLock::new(),
 };
 
-/// The palette a chrome theme draws in.
+/// The built-in palette a chrome theme draws in.
 pub fn palette_of(chrome: ChromeTheme) -> &'static Palette {
     match chrome {
         ChromeTheme::Midnight => &MIDNIGHT,
@@ -150,49 +152,177 @@ pub fn palette_of(chrome: ChromeTheme) -> &'static Palette {
     }
 }
 
+impl Palette {
+    /// Whether the ground is light (relative luminance above 0.18), so overlays darken it
+    /// instead of lightening it. The built-ins are all dark.
+    pub fn is_light(&self) -> bool {
+        let g = rgb(self.ground);
+        0.2126 * g.r + 0.7152 * g.g + 0.0722 * g.b > 0.18
+    }
+
+    /// A light overlay at `a`, for fills and borders over this palette's surfaces: white on a
+    /// dark ground, and ink at 90% of `a` on a light one.
+    pub fn white(&self, a: f32) -> Color {
+        if self.is_light() {
+            rgb(self.ink).alpha(a * 0.9)
+        } else {
+            Color::WHITE.alpha(a)
+        }
+    }
+
+    /// A shadow at `a`: black, and a little over a third as strong on a light ground.
+    pub fn black(&self, a: f32) -> Color {
+        Color::BLACK.alpha(if self.is_light() { a * 0.35 } else { a })
+    }
+
+    /// This palette's kit, built the first time it is asked for.
+    pub fn kit(&self) -> &Kit {
+        self.kit.get_or_init(|| self.build_kit())
+    }
+
+    fn build_kit(&self) -> Kit {
+        let p = self;
+        let mut k = Kit::from_palette_focus(
+            PaletteSeed {
+                bg: rgb(p.ground),
+                fg: rgb(p.ink),
+                accent: rgb(p.accent),
+            },
+            PaletteFocus::Custom(rgb(p.accent)),
+        );
+        let c = &mut k.c;
+        (c.page, c.bg_base, c.surface_base) = (rgb(p.ground), rgb(p.ground), rgb(p.ground));
+        c.bg_deep = rgb(p.card);
+        for slot in [
+            &mut c.layer_01,
+            &mut c.layer_02,
+            &mut c.surface_raised,
+            &mut c.surface_raised_base,
+            &mut c.surface_float,
+        ] {
+            *slot = rgb(p.popover);
+        }
+        let white = |a| p.white(a);
+        (c.hover, c.surface_hover, c.surface_raised_hover) =
+            (white(0.07), white(0.07), white(0.07));
+        c.pressed = white(0.11);
+        (c.border_base, c.border_muted, c.border_weak) = (white(0.12), white(0.08), white(0.06));
+        (c.border_strong, c.border_hover) = (white(0.2), white(0.2));
+        c.border_focus = rgb(p.accent);
+        (c.text_base, c.text_strong, c.icon_base) = (rgb(p.ink), rgb(p.ink), rgb(p.ink));
+        for slot in [
+            &mut c.text_muted,
+            &mut c.text_faint,
+            &mut c.text_weak,
+            &mut c.icon_muted,
+            &mut c.icon_faint,
+            &mut c.icon_weaker,
+        ] {
+            *slot = rgb(p.muted);
+        }
+        (c.text_accent, c.icon_accent) = (rgb(p.accent), rgb(p.accent));
+        c.success.fg = rgb(p.live);
+        c.warning.fg = rgb(p.warning);
+        c.danger.fg = rgb(p.danger);
+        k.radius.sm = 8.;
+        k.radius.md = 10.;
+        k
+    }
+}
+
+/// A chrome palette in use: a built-in, or one made at runtime and shared by reference
+/// count, so it is freed with its last holder. Cheap to clone; derefs to the [`Palette`].
+#[derive(Clone)]
+pub struct PaletteRef(Shared);
+
+#[derive(Clone)]
+enum Shared {
+    Builtin(&'static Palette),
+    Runtime(Rc<Palette>),
+}
+
+impl std::ops::Deref for PaletteRef {
+    type Target = Palette;
+    fn deref(&self) -> &Palette {
+        match &self.0 {
+            Shared::Builtin(p) => p,
+            Shared::Runtime(p) => p,
+        }
+    }
+}
+
+/// The same palette, not merely equal tokens.
+impl PartialEq for PaletteRef {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq::<Palette>(&**self, &**other)
+    }
+}
+
+impl From<&'static Palette> for PaletteRef {
+    fn from(p: &'static Palette) -> Self {
+        Self(Shared::Builtin(p))
+    }
+}
+impl From<Rc<Palette>> for PaletteRef {
+    fn from(p: Rc<Palette>) -> Self {
+        Self(Shared::Runtime(p))
+    }
+}
+impl From<Palette> for PaletteRef {
+    fn from(p: Palette) -> Self {
+        Rc::new(p).into()
+    }
+}
+
 thread_local! {
     // Per thread: Rune builds a window's view on its UI thread, and headless runtimes on
-    // other threads keep their own. The root view sets it before every build.
-    static ACTIVE: std::cell::Cell<&'static Palette> = const { std::cell::Cell::new(&MIDNIGHT) };
+    // other threads keep their own. The root view sets it, from the workspace's, before
+    // every build.
+    static ACTIVE: RefCell<PaletteRef> = RefCell::new(PaletteRef::from(&MIDNIGHT));
+}
+
+fn with_palette<R>(f: impl FnOnce(&Palette) -> R) -> R {
+    ACTIVE.with_borrow(|p| f(p))
 }
 
 /// The palette views on this thread draw in.
-pub fn palette() -> &'static Palette {
-    ACTIVE.get()
+pub fn palette() -> PaletteRef {
+    ACTIVE.with_borrow(PaletteRef::clone)
 }
-pub fn set_palette(palette: &'static Palette) {
-    ACTIVE.set(palette);
+/// Draw views on this thread in `palette`. The one it replaces is released.
+pub fn set_palette(palette: impl Into<PaletteRef>) {
+    ACTIVE.set(palette.into());
 }
 
 pub fn ground() -> u32 {
-    palette().ground
+    with_palette(|p| p.ground)
 }
 pub fn card() -> u32 {
-    palette().card
+    with_palette(|p| p.card)
 }
 pub fn popover() -> u32 {
-    palette().popover
+    with_palette(|p| p.popover)
 }
 pub fn ink() -> u32 {
-    palette().ink
+    with_palette(|p| p.ink)
 }
 pub fn muted() -> u32 {
-    palette().muted
+    with_palette(|p| p.muted)
 }
 pub fn accent() -> u32 {
-    palette().accent
+    with_palette(|p| p.accent)
 }
 pub fn accent2() -> u32 {
-    palette().accent2
+    with_palette(|p| p.accent2)
 }
 pub fn warning() -> u32 {
-    palette().warning
+    with_palette(|p| p.warning)
 }
 pub fn danger() -> u32 {
-    palette().danger
+    with_palette(|p| p.danger)
 }
 pub fn on_accent() -> u32 {
-    palette().on_accent
+    with_palette(|p| p.on_accent)
 }
 
 /// How much of its tone the `SELECTION` fill is.
@@ -258,55 +388,19 @@ pub fn pop_in() -> Transition {
     Transition::scale(0.96).springs(SpringPair::new(POP, SNAPPY))
 }
 
+/// The active palette's kit, held with its palette. Derefs to the [`Kit`].
+pub struct KitRef(PaletteRef);
+
+impl std::ops::Deref for KitRef {
+    type Target = Kit;
+    fn deref(&self) -> &Kit {
+        self.0.kit()
+    }
+}
+
 /// The active palette's kit.
-pub fn kit() -> &'static Kit {
-    let p = palette();
-    p.kit.get_or_init(|| {
-        let mut k = Kit::from_palette_focus(
-            PaletteSeed {
-                bg: rgb(p.ground),
-                fg: rgb(p.ink),
-                accent: rgb(p.accent),
-            },
-            PaletteFocus::Custom(rgb(p.accent)),
-        );
-        let c = &mut k.c;
-        (c.page, c.bg_base, c.surface_base) = (rgb(p.ground), rgb(p.ground), rgb(p.ground));
-        c.bg_deep = rgb(p.card);
-        for slot in [
-            &mut c.layer_01,
-            &mut c.layer_02,
-            &mut c.surface_raised,
-            &mut c.surface_raised_base,
-            &mut c.surface_float,
-        ] {
-            *slot = rgb(p.popover);
-        }
-        (c.hover, c.surface_hover, c.surface_raised_hover) =
-            (white(0.07), white(0.07), white(0.07));
-        c.pressed = white(0.11);
-        (c.border_base, c.border_muted, c.border_weak) = (white(0.12), white(0.08), white(0.06));
-        (c.border_strong, c.border_hover) = (white(0.2), white(0.2));
-        c.border_focus = rgb(p.accent);
-        (c.text_base, c.text_strong, c.icon_base) = (rgb(p.ink), rgb(p.ink), rgb(p.ink));
-        for slot in [
-            &mut c.text_muted,
-            &mut c.text_faint,
-            &mut c.text_weak,
-            &mut c.icon_muted,
-            &mut c.icon_faint,
-            &mut c.icon_weaker,
-        ] {
-            *slot = rgb(p.muted);
-        }
-        (c.text_accent, c.icon_accent) = (rgb(p.accent), rgb(p.accent));
-        c.success.fg = rgb(p.live);
-        c.warning.fg = rgb(p.warning);
-        c.danger.fg = rgb(p.danger);
-        k.radius.sm = 8.;
-        k.radius.md = 10.;
-        k
-    })
+pub fn kit() -> KitRef {
+    KitRef(palette())
 }
 
 pub fn ui(size: f32) -> TextStyle {
@@ -516,6 +610,26 @@ icon!(
     r#"path d="m4 4 12 12""#
 );
 
+/// A light palette for tests: there is no built-in one.
+#[cfg(test)]
+pub(crate) fn paper() -> Palette {
+    Palette {
+        ground: 0xffffff,
+        card: 0xffffff,
+        popover: 0xf6f8fa,
+        ink: 0x1f2328,
+        muted: 0x59636e,
+        accent: 0x0969da,
+        accent2: 0x8250df,
+        live: 0x1a7f37,
+        warning: 0x9a6700,
+        danger: 0xcf222e,
+        on_accent: 0xffffff,
+        terminal_selection: 0xb6e3ff,
+        kit: OnceLock::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,47 +695,63 @@ mod tests {
         h * 60.
     }
 
+    /// What a white overlay at `a` over `under` comes to on `p`'s ground: white on a dark
+    /// ground, ink at 90% of `a` on a light one.
+    fn overlay(p: &Palette, a: f32, under: u32) -> u32 {
+        if p.is_light() {
+            mix(p.ink, under, a * 0.9)
+        } else {
+            mix(0xffffff, under, a)
+        }
+    }
+
+    /// The checks every chrome palette passes, built in or not.
+    fn assert_legible(name: &str, p: &Palette) {
+        assert!(contrast(p.muted, p.card) >= 4.5, "{name}: muted on card");
+        assert!(contrast(p.ink, p.popover) >= 4.5, "{name}: ink on popover");
+        // Keycaps: on a popover's rows, and on the sidebar's search chip (itself an 8%
+        // overlay over the card).
+        let keys = mix(p.ink, p.muted, 0.5);
+        for (surface, under, lift) in [("popover", p.popover, 0.), ("sidebar", p.card, 0.08)] {
+            let chip = overlay(p, KEYCAP_FILL + lift, under);
+            assert!(
+                contrast(keys, chip) >= 4.5,
+                "{name}: keycaps on the {surface}"
+            );
+        }
+        // A selected row keeps its label and its keycaps in ink on either tint, and its
+        // outline stands clear of the popover around it.
+        for (kind, tone) in [("selection", p.accent), ("destructive selection", p.danger)] {
+            let fill = mix(tone, p.popover, SELECTION_FILL);
+            assert!(contrast(p.ink, fill) >= 4.5, "{name}: ink on the {kind}");
+            let chip = overlay(p, KEYCAP_LIT, fill);
+            assert!(
+                contrast(p.ink, chip) >= 4.5,
+                "{name}: keycaps on the {kind}"
+            );
+            assert!(contrast(tone, p.popover) >= 3., "{name}: {kind} outline");
+        }
+        // Trouble always carries a word; Gruvbox's brightest red is 4.3:1 on its ground.
+        for (word, color) in [("warning", p.warning), ("danger", p.danger)] {
+            for surface in [p.card, p.popover] {
+                assert!(contrast(color, surface) >= 3., "{name}: {word}");
+            }
+        }
+        let gap = (hue(p.warning) - hue(p.danger)).abs();
+        assert!(
+            gap.min(360. - gap) >= 30.,
+            "{name}: warning and danger differ in hue"
+        );
+    }
+
     #[test]
     fn every_palette_is_legible_and_pairs_with_its_terminal_theme() {
         assert!((contrast(0xffffff, 0x000000) - 21.).abs() < 1e-9);
         for chrome in ChromeTheme::ALL {
             let p = palette_of(chrome);
             let name = chrome.name();
-            assert!(contrast(p.muted, p.card) >= 4.5, "{name}: muted on card");
-            assert!(contrast(p.ink, p.popover) >= 4.5, "{name}: ink on popover");
-            // Keycaps: on a popover's rows, and on the sidebar's search chip (itself 8% white
-            // over the card).
-            let keys = mix(p.ink, p.muted, 0.5);
-            for (surface, under, lift) in [("popover", p.popover, 0.), ("sidebar", p.card, 0.08)] {
-                let chip = mix(0xffffff, under, KEYCAP_FILL + lift);
-                assert!(
-                    contrast(keys, chip) >= 4.5,
-                    "{name}: keycaps on the {surface}"
-                );
-            }
-            // A selected row keeps its label and its keycaps in ink on either tint, and its
-            // outline stands clear of the popover around it.
-            for (kind, tone) in [("selection", p.accent), ("destructive selection", p.danger)] {
-                let fill = mix(tone, p.popover, SELECTION_FILL);
-                assert!(contrast(p.ink, fill) >= 4.5, "{name}: ink on the {kind}");
-                let chip = mix(0xffffff, fill, KEYCAP_LIT);
-                assert!(
-                    contrast(p.ink, chip) >= 4.5,
-                    "{name}: keycaps on the {kind}"
-                );
-                assert!(contrast(tone, p.popover) >= 3., "{name}: {kind} outline");
-            }
-            // Trouble always carries a word; Gruvbox's brightest red is 4.3:1 on its ground.
-            for (word, color) in [("warning", p.warning), ("danger", p.danger)] {
-                for surface in [p.card, p.popover] {
-                    assert!(contrast(color, surface) >= 3., "{name}: {word}");
-                }
-            }
-            let gap = (hue(p.warning) - hue(p.danger)).abs();
-            assert!(
-                gap.min(360. - gap) >= 30.,
-                "{name}: warning and danger differ in hue"
-            );
+            assert!(!p.is_light(), "{name}: the built-ins are dark");
+            assert_legible(name, p);
             assert_eq!(p.card, p.ground, "{name}: one surface");
             let paired = rex_rune::terminal_theme::paired(chrome);
             assert_eq!(
@@ -635,5 +765,30 @@ mod tests {
         }
         set_palette(&MIDNIGHT);
         assert_eq!(kit().c.page, rgb(0x001528), "Midnight's kit is unchanged");
+        let paper = paper();
+        assert!(paper.is_light());
+        assert_legible("paper", &paper);
+    }
+
+    #[test]
+    fn a_light_ground_tints_overlays_with_ink_and_softens_shadows() {
+        let near = |a: Color, b: Color| {
+            assert!(
+                (a.r - b.r).abs() < 1e-6
+                    && (a.g - b.g).abs() < 1e-6
+                    && (a.b - b.b).abs() < 1e-6
+                    && (a.a - b.a).abs() < 1e-6,
+                "{a:?} is not {b:?}"
+            )
+        };
+        set_palette(PaletteRef::from(paper()));
+        near(white(0.1), rgb(0x1f2328).alpha(0.09));
+        near(black(0.6), Color::BLACK.alpha(0.21));
+        near(kit().c.hover, rgb(0x1f2328).alpha(0.063));
+        near(kit().c.page, rgb(0xffffff));
+        set_palette(&MIDNIGHT);
+        near(white(0.1), Color::WHITE.alpha(0.1));
+        near(black(0.6), Color::BLACK.alpha(0.6));
+        near(kit().c.hover, Color::WHITE.alpha(0.07));
     }
 }

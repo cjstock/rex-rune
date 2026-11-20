@@ -277,7 +277,7 @@ pub fn stepper(
     down: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
     up: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
 ) -> El {
-    let k = kit();
+    let k = &kit();
     row()
         .gap(8.)
         .center_y()
@@ -356,7 +356,7 @@ pub fn segmented_fixed(
     selected: Option<usize>,
     pick: impl Fn(&mut Workspace, usize, &mut Tx) + Clone + 'static,
 ) -> El {
-    let k = kit();
+    let k = &kit();
     let c = &k.c;
     let each = width / segments.len().max(1) as f32;
     let hairline = |color| Shadow {
