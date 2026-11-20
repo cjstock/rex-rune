@@ -1373,24 +1373,76 @@ struct ThemeServer {
     endpoint: String,
     events: tokio::sync::mpsc::UnboundedSender<Value>,
     requests: tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+    release: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Every request read so far, in order.
+    log: Vec<(String, Value)>,
+}
+
+/// A window's blocks, as `[id, owner]` (owner none for nobody).
+type ThemeBlocks = Vec<(&'static str, Option<&'static str>)>;
+
+/// What a [`ThemeServer`] serves beyond its selected session.
+#[derive(Default)]
+struct Serve {
+    /// Sessions listed after the selected one, each with its window's blocks: never opened,
+    /// so their layouts are read only in the background.
+    others: Vec<(&'static str, ThemeBlocks)>,
+    /// `set_theme` fails with this error code.
+    theme_error: Option<&'static str>,
+    /// The first `set_theme` to this block is answered only on [`ThemeServer::release`];
+    /// a `test.hold` request always is.
+    hold: Option<&'static str>,
+    /// `set_theme` to this block is never answered.
+    silent: Option<&'static str>,
+}
+
+/// A view of `session` with one window holding `blocks` (`[id, owner]`, owner none for nobody).
+fn theme_view(session: &str, blocks: &[(&str, Option<&str>)]) -> Value {
+    let blocks: Vec<Value> = blocks
+        .iter()
+        .map(|(id, owner)| json!({"block_id":id,"creator_name":activity::TERMINAL,"owner":owner}))
+        .collect();
+    json!({"session_id":session,"label":session,"revision":1,
+        "windows":[{"window_id":format!("{session}/w"),"layers":[{"kind":"tiled",
+            "layout":{"block_id":blocks[0]["block_id"]},"blocks":blocks}]}]})
 }
 
 impl ThemeServer {
     /// Serves one session whose single window holds `blocks` (`[id, owner]`, owner none for
     /// nobody); `set_theme` fails with `theme_error` when given.
-    #[allow(clippy::result_large_err)] // tungstenite's callback fixes the error type.
     async fn start(blocks: &[(&str, Option<&str>)], theme_error: Option<&'static str>) -> Self {
+        Self::serve(
+            blocks,
+            Serve {
+                theme_error,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::result_large_err)] // tungstenite's callback fixes the error type.
+    async fn serve(blocks: &[(&str, Option<&str>)], serve: Serve) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let blocks: Vec<Value> = blocks
+        let mut view = theme_view(SESSION, blocks);
+        view["label"] = json!("snapshot");
+        view["windows"][0]["window_id"] = json!("w");
+        let Serve {
+            others,
+            theme_error,
+            mut hold,
+            silent,
+        } = serve;
+        let others: HashMap<String, Value> = others
             .iter()
-            .map(|(id, owner)| json!({"block_id":id,"creator_name":activity::TERMINAL,"owner":owner}))
+            .map(|(id, blocks)| ((*id).to_owned(), theme_view(id, blocks)))
             .collect();
-        let view = json!({"session_id":SESSION,"label":"snapshot","revision":1,
-            "windows":[{"window_id":"w","layers":[{"kind":"tiled",
-                "layout":{"block_id":blocks[0]["block_id"]},"blocks":blocks}]}]});
+        let listed: Vec<&str> = others.keys().map(String::as_str).collect();
+        let bootstrap = boot_with(&listed);
         let (events, mut pushed) = tokio::sync::mpsc::unbounded_channel::<Value>();
         let (record, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (release, mut released) = tokio::sync::mpsc::unbounded_channel::<()>();
         tokio::spawn(async move {
             let mut seq = 1;
             loop {
@@ -1432,11 +1484,31 @@ impl ThemeServer {
                     seq += 1;
                     let method = request["method"].as_str().unwrap_or_default().to_owned();
                     let _ = record.send((method.clone(), request["payload"].clone()));
+                    let block = request["payload"]["block_id"].as_str();
+                    let theme = method == "com.superlogical.terminal.set_theme";
+                    if theme && block.is_some() && block == silent {
+                        continue;
+                    }
+                    if method == "test.hold" || (theme && block.is_some() && block == hold) {
+                        if theme {
+                            hold = None;
+                        }
+                        released.recv().await;
+                    }
                     let payload = match method.as_str() {
                         "session.bootstrap" => {
-                            let mut boot = serde_json::to_value(boot()).unwrap();
+                            let mut boot = bootstrap.clone();
                             boot["selected_session"]["view"] = view.clone();
                             boot
+                        }
+                        "session.view" => {
+                            match request["payload"]["session_id"]
+                                .as_str()
+                                .and_then(|id| others.get(id))
+                            {
+                                Some(view) => view.clone(),
+                                None => json!({}),
+                            }
                         }
                         "session.attach_all" => {
                             json!({"sessions":[{"session_id":SESSION,"label":"snapshot"},
@@ -1465,7 +1537,24 @@ impl ThemeServer {
             endpoint,
             events,
             requests,
+            release,
+            log: Vec::new(),
         }
+    }
+
+    /// Answer the request being held.
+    fn release(&self) {
+        self.release.send(()).unwrap();
+    }
+
+    /// The next request the client makes, as (method, payload).
+    async fn next_request(&mut self) -> (String, Value) {
+        let request = tokio::time::timeout(Duration::from_secs(8), self.requests.recv())
+            .await
+            .expect("a request")
+            .unwrap();
+        self.log.push(request.clone());
+        request
     }
 
     fn owner(&self, block: &str, owner: Option<&str>) {
@@ -1479,13 +1568,8 @@ impl ThemeServer {
     async fn themes_until(&mut self, method: &str) -> (Vec<(String, Value)>, Value) {
         let mut themes = Vec::new();
         loop {
-            let (name, payload) =
-                tokio::time::timeout(Duration::from_secs(8), self.requests.recv())
-                    .await
-                    .unwrap_or_else(|_| panic!("no {method}"))
-                    .unwrap();
+            let (name, payload) = self.next_request().await;
             if name == "com.superlogical.terminal.set_theme" {
-                assert_eq!(payload["session_id"], SESSION);
                 themes.push((
                     payload["block_id"].as_str().unwrap().to_owned(),
                     payload["args"].clone(),
@@ -1834,6 +1918,217 @@ async fn a_server_without_set_theme_is_told_once_and_never_again() {
         created["initial_windows"][0]["layout"]["block"].get("options"),
         None,
         "new blocks carry no theme either"
+    );
+    drop(host);
+}
+
+#[tokio::test]
+async fn themes_reach_blocks_in_sessions_never_opened_without_a_stream() {
+    let mut server = ThemeServer::serve(
+        &[("block:a", None)],
+        Serve {
+            others: vec![(
+                OTHER,
+                vec![
+                    ("block:x", None),
+                    ("block:y", Some("client:other")),
+                    ("block:z", Some("client:test")),
+                ],
+            )],
+            ..Default::default()
+        },
+    )
+    .await;
+    let first = SetTheme::new().background("#111111");
+    let host = HostConnection::spawn(
+        server.endpoint.clone(),
+        None,
+        None,
+        None,
+        true,
+        Some(first.clone()),
+    );
+    until(&host, |m| m.background_views.contains(OTHER)).await;
+    let first = serde_json::to_value(&first).unwrap();
+    let sentinel = HostCommand::Request {
+        method: "test.sentinel".into(),
+        payload: json!({}),
+    };
+    host.commands.send(sentinel).unwrap();
+    let (themes, _) = server.themes_until("test.sentinel").await;
+    assert_eq!(
+        sorted(themes),
+        declared(&["block:a", "block:x", "block:z"], &first),
+        "a background layout's unowned and owned blocks, not another client's"
+    );
+    let opened: Vec<_> = server
+        .log
+        .iter()
+        .filter(|(method, payload)| {
+            matches!(method.as_str(), "data.connect" | "session.attach")
+                && payload["session_id"] == OTHER
+        })
+        .collect();
+    assert_eq!(opened, Vec::<&(String, Value)>::new(), "no stream opened");
+    assert!(host.model.lock().unwrap().background_views.contains(OTHER));
+
+    let second = SetTheme::new().background("#222222");
+    assert_eq!(
+        sorted(
+            themes_after_command(&mut server, &host, HostCommand::Theme(Some(second.clone())))
+                .await
+        ),
+        declared(
+            &["block:a", "block:x", "block:z"],
+            &serde_json::to_value(&second).unwrap()
+        ),
+        "a theme change reaches them too"
+    );
+    drop(host);
+}
+
+#[tokio::test]
+async fn queued_themes_collapse_to_one_pass_with_the_newest() {
+    let mut server = ThemeServer::start(&[("block:a", None), ("block:b", None)], None).await;
+    let host = HostConnection::spawn(
+        server.endpoint.clone(),
+        None,
+        None,
+        None,
+        true,
+        Some(SetTheme::new().background("#111111")),
+    );
+    server
+        .themes_until("com.superlogical.terminal.program_status")
+        .await;
+    host.commands
+        .send(HostCommand::Request {
+            method: "test.hold".into(),
+            payload: json!({}),
+        })
+        .unwrap();
+    server.themes_until("test.hold").await;
+    // Both queue behind the held request.
+    let newest = SetTheme::new().background("#333333");
+    for theme in [SetTheme::new().background("#222222"), newest.clone()] {
+        host.commands.send(HostCommand::Theme(Some(theme))).unwrap();
+    }
+    host.commands
+        .send(HostCommand::Request {
+            method: "test.sentinel".into(),
+            payload: json!({}),
+        })
+        .unwrap();
+    server.release();
+    let (themes, _) = server.themes_until("test.sentinel").await;
+    assert_eq!(
+        sorted(themes),
+        declared(
+            &["block:a", "block:b"],
+            &serde_json::to_value(&newest).unwrap()
+        ),
+        "one pass, with only the newest theme"
+    );
+    drop(host);
+}
+
+#[tokio::test]
+async fn a_newer_theme_mid_pass_reaches_the_blocks_still_waiting() {
+    let mut server = ThemeServer::serve(
+        &[("block:a", None), ("block:b", None), ("block:c", None)],
+        Serve {
+            hold: Some("block:a"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let host = HostConnection::spawn(
+        server.endpoint.clone(),
+        None,
+        None,
+        None,
+        true,
+        Some(SetTheme::new().background("#111111")),
+    );
+    let held = loop {
+        let (method, payload) = server.next_request().await;
+        if method == "com.superlogical.terminal.set_theme" {
+            break payload;
+        }
+    };
+    assert_eq!(
+        held["block_id"], "block:a",
+        "the pass starts with the held block"
+    );
+    let newer = SetTheme::new().background("#222222");
+    host.commands
+        .send(HostCommand::Theme(Some(newer.clone())))
+        .unwrap();
+    server.release();
+    let (themes, _) = server
+        .themes_until("com.superlogical.terminal.program_status")
+        .await;
+    assert_eq!(
+        themes,
+        declared(
+            &["block:b", "block:c", "block:a"],
+            &serde_json::to_value(&newer).unwrap()
+        ),
+        "the waiting blocks get the newer theme, then the one already done"
+    );
+    drop(host);
+}
+
+#[tokio::test]
+async fn a_timed_out_block_is_sent_a_theme_again_only_when_it_changes() {
+    let mut server = ThemeServer::serve(
+        &[("block:a", None), ("block:b", None)],
+        Serve {
+            silent: Some("block:a"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let first = SetTheme::new().background("#111111");
+    let host = HostConnection::spawn(
+        server.endpoint.clone(),
+        None,
+        None,
+        None,
+        true,
+        Some(first.clone()),
+    );
+    let (themes, _) = server
+        .themes_until("com.superlogical.terminal.program_status")
+        .await;
+    assert_eq!(
+        themes,
+        declared(
+            &["block:a", "block:b"],
+            &serde_json::to_value(&first).unwrap()
+        )
+    );
+    assert_eq!(
+        server.themes_after_events().await,
+        [],
+        "not retried after an event"
+    );
+    assert_eq!(
+        themes_after_command(&mut server, &host, HostCommand::Theme(Some(first))).await,
+        [],
+        "nor for the same theme"
+    );
+    let second = SetTheme::new().background("#222222");
+    assert_eq!(
+        sorted(
+            themes_after_command(&mut server, &host, HostCommand::Theme(Some(second.clone())))
+                .await
+        ),
+        declared(
+            &["block:a", "block:b"],
+            &serde_json::to_value(&second).unwrap()
+        ),
+        "due again on the next change"
     );
     drop(host);
 }
