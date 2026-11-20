@@ -1,0 +1,142 @@
+<title>Material Chrome Renders</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: a contact viewer. Controls row on top, the render large, the palette's tokens and checks beside it. */
+:root {
+  --bg: #f4f6f8; --panel: #ffffff; --fg: #15191d; --muted: #5a6470; --line: #d8dee4; --accent: #1f6feb; --bad: #b42318; --ok: #1a7f37;
+  --ui: "Inter", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e1215; --panel: #161b20; --fg: #e6ebf0; --muted: #96a2ae; --line: #2a323a; --accent: #6aa8ff; --bad: #ff8a80; --ok: #6fd38a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0e1215; --panel: #161b20; --fg: #e6ebf0; --muted: #96a2ae; --line: #2a323a; --accent: #6aa8ff; --bad: #ff8a80; --ok: #6fd38a; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--ui);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 16px 72px; }
+h1 { font-size: 18px; margin: 0 0 4px; text-wrap: balance; }
+.lede { color: var(--muted); margin: 0 0 14px; max-width: 70ch; line-height: 1.45; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: end; margin-bottom: 12px; }
+.controls label { display: grid; gap: 4px; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+select { font: 13px var(--ui); padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); min-width: 0; max-width: 100%; }
+select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { font: 13px var(--ui); padding: 5px 12px; border: 0; background: var(--panel); color: var(--fg); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
+.shot { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.shot img { display: block; width: 100%; height: auto; }
+aside { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: grid; gap: 10px; min-width: 0; }
+aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; }
+.tok { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: center; font-size: 12px; }
+.sw { width: 22px; height: 16px; border-radius: 4px; border: 1px solid var(--line); }
+.tok code { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.role { color: var(--muted); font-size: 11px; grid-column: 2 / 4; margin-top: -6px; }
+.checks { font-size: 12px; line-height: 1.5; margin: 0; padding-left: 16px; }
+.checks.pass { color: var(--ok); list-style: none; padding-left: 0; }
+.checks li.bad { color: var(--bad); }
+.desc { font-size: 12px; line-height: 1.45; color: var(--muted); margin: 0; }
+.bar { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  display: flex; gap: 6px; align-items: center; background: var(--fg); color: var(--bg); border-radius: 999px; padding: 6px 10px; font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.25); max-width: calc(100% - 32px); }
+.bar button { background: transparent; border: 0; color: inherit; font-size: 16px; cursor: pointer; padding: 2px 8px; }
+.bar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+
+<h1>Chrome palette from a generated Material scheme</h1>
+<p class="lede">Prototype renders of the real Rex Rune build (prototype branch), headless through Rune's <code>--snap</code>. Each palette is built from a matugen <code>scheme-tonal-spot</code> of a real wallpaper, plus DMS's dank16 for status colours. The panes declare a Ghostty theme from the same scheme. Mappings A, B and C differ in which roles fill the palette slots. Arrow keys cycle the mapping; Up and Down cycle the screen.</p>
+
+<div class="controls">
+  <label for="scheme">Wallpaper scheme <select id="scheme"></select></label>
+  <label>Mode <span class="seg" id="mode"></span></label>
+  <label>Mapping <span class="seg" id="map"></span></label>
+  <label>Screen <span class="seg" id="screen"></span></label>
+</div>
+
+<div class="main">
+  <div class="shot"><img id="img" alt=""></div>
+  <aside>
+    <h2>Mapping</h2>
+    <p class="desc" id="mapdesc"></p>
+    <h2>Tokens</h2>
+    <div id="tokens" style="display:grid; gap:8px"></div>
+    <h2>Legibility checks</h2>
+    <ul class="checks" id="checks"></ul>
+  </aside>
+</div>
+
+<div class="bar" role="toolbar" aria-label="Mapping">
+  <button id="prev" aria-label="Previous mapping">‹</button><span id="barlabel"></span><button id="next" aria-label="Next mapping">›</button>
+</div>
+
+<script>
+const SCHEMES = [
+  ["a_close_up_of_water", "Water (cyan)"],
+  ["1-tree-tops", "Tree tops (blue)"],
+  ["a_close_up_of_a_branch_with_pink_flowers", "Pink blossom (pink)"],
+  ["a_group_of_yellow_flowers", "Yellow flowers (amber)"],
+  ["de_env_hellonearth", "Hell on Earth (orange-red)"],
+  ["current-desktop", "Current desktop (DMS cache)"],
+];
+const MAPS = {
+  A: "M3 as specified: surface ground, surface_container_high popovers, tertiary second accent, M3 error for danger, primary_container selection.",
+  B: "Lifted ground like DMS panels: surface_container ground, surface_container_highest popovers, every status colour from dank16 (red, yellow, green), secondary_container selection.",
+  C: "Deepest ground: surface_container_lowest ground, surface_container popovers, M3 error for danger, neutral surface_variant selection.",
+};
+const SCREENS = [["workspace", "Workspace"], ["commands", "Commands"], ["settings", "Settings"], ["confirm", "Confirm"]];
+const state = { scheme: SCHEMES[0][0], mode: "dark", map: "A", screen: "workspace" };
+let data = null;
+
+const $ = id => document.getElementById(id);
+function seg(id, items, key) {
+  const el = $(id); el.innerHTML = "";
+  for (const [v, label] of items) {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.dataset.v = v;
+    b.addEventListener("click", () => { state[key] = v; render(); });
+    el.appendChild(b);
+  }
+}
+for (const [v, label] of SCHEMES) { const o = new Option(label, v); $("scheme").add(o); }
+$("scheme").addEventListener("change", e => { state.scheme = e.target.value; render(); });
+seg("mode", [["dark", "Dark"], ["light", "Light"]], "mode");
+seg("map", [["A", "A"], ["B", "B"], ["C", "C"]], "map");
+seg("screen", SCREENS, "screen");
+
+function cycle(key, list, step) {
+  const i = list.indexOf(state[key]); state[key] = list[(i + step + list.length) % list.length]; render();
+}
+$("prev").addEventListener("click", () => cycle("map", ["A", "B", "C"], -1));
+$("next").addEventListener("click", () => cycle("map", ["A", "B", "C"], 1));
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (e.key === "ArrowLeft") cycle("map", ["A", "B", "C"], -1);
+  else if (e.key === "ArrowRight") cycle("map", ["A", "B", "C"], 1);
+  else if (e.key === "ArrowUp") { e.preventDefault(); cycle("screen", SCREENS.map(s => s[0]), -1); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); cycle("screen", SCREENS.map(s => s[0]), 1); }
+});
+
+function render() {
+  $("scheme").value = state.scheme;
+  for (const [id, key] of [["mode", "mode"], ["map", "map"], ["screen", "screen"]])
+    for (const b of $(id).children) b.setAttribute("aria-pressed", String(b.dataset.v === state[key]));
+  const name = `${state.scheme}.${state.mode}.${state.map}`;
+  $("img").src = `shots/${name}.${state.screen}.png`;
+  $("img").alt = `Rex Rune ${state.screen} in mapping ${state.map}, ${state.mode} scheme from ${state.scheme}`;
+  $("mapdesc").textContent = MAPS[state.map];
+  $("barlabel").textContent = `${state.map} · ${SCHEMES.find(s => s[0] === state.scheme)[1]} · ${state.mode}`;
+  if (!data) return;
+  const p = data.palettes[name], roles = data.roles[state.map];
+  $("tokens").innerHTML = "";
+  for (const [tok, hex] of Object.entries(p.tokens)) {
+    const row = document.createElement("div"); row.className = "tok";
+    row.innerHTML = `<span class="sw" style="background:${hex}"></span><span>${tok}</span><code>${hex}</code><span class="role">${roles[tok]}</span>`;
+    $("tokens").appendChild(row);
+  }
+  const ul = $("checks"); ul.innerHTML = "";
+  ul.className = p.fails.length ? "checks" : "checks pass";
+  if (!p.fails.length) ul.innerHTML = "<li>Every check theme.rs runs passes</li>";
+  for (const f of p.fails) { const li = document.createElement("li"); li.className = "bad"; li.textContent = f; ul.appendChild(li); }
+}
+fetch("palettes.json").then(r => r.json()).then(j => { data = j; render(); }).catch(() => render());
+render();
+</script>

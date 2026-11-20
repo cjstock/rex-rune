@@ -25,11 +25,21 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     channel(16) | channel(8) | channel(0)
 }
 
+// PROTOTYPE (material chrome): on a light ground, "white" overlays become ink-tinted overlays
+// and shadows soften. Every white()/black() call site assumes a dark ground otherwise.
+pub fn is_light() -> bool {
+    let g = rgb(palette().ground);
+    0.2126 * g.r + 0.7152 * g.g + 0.0722 * g.b > 0.18
+}
 pub fn white(a: f32) -> Color {
-    Color::WHITE.alpha(a)
+    if is_light() {
+        rgb(palette().ink).alpha(a * 0.9)
+    } else {
+        Color::WHITE.alpha(a)
+    }
 }
 pub fn black(a: f32) -> Color {
-    Color::BLACK.alpha(a)
+    Color::BLACK.alpha(if is_light() { a * 0.35 } else { a })
 }
 pub fn shadow(x: f32, y: f32, blur: f32, color: Color) -> Shadow {
     Shadow {
@@ -140,8 +150,78 @@ pub static GRUVBOX_DARK: Palette = Palette {
     kit: OnceLock::new(),
 };
 
+/// PROTOTYPE (material chrome): `REX_PROTO_SCHEME=<flat roles json>` and `REX_PROTO_MAP=A|B|C`
+/// replace every chrome theme with a palette built from a generated Material 3 scheme, leaked
+/// once (a real build would leak once per change, or hold an `Arc`).
+fn proto_palette() -> Option<&'static Palette> {
+    static PROTO: OnceLock<Option<&'static Palette>> = OnceLock::new();
+    *PROTO.get_or_init(|| {
+        let path = std::env::var("REX_PROTO_SCHEME").ok()?;
+        let roles: std::collections::HashMap<String, serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        let c = |k: &str| {
+            u32::from_str_radix(roles[k].as_str().unwrap().trim_start_matches('#'), 16).unwrap()
+        };
+        let map = std::env::var("REX_PROTO_MAP").unwrap_or_else(|_| "A".into());
+        let p = match map.as_str() {
+            // A: M3 as specified. Surface ground, container-high popovers, error for danger.
+            "A" => Palette {
+                ground: c("surface"),
+                card: c("surface"),
+                popover: c("surface_container_high"),
+                ink: c("on_surface"),
+                muted: c("on_surface_variant"),
+                accent: c("primary"),
+                accent2: c("tertiary"),
+                live: c("secondary"),
+                warning: c("color3"),
+                danger: c("error"),
+                on_accent: c("on_primary"),
+                terminal_selection: c("primary_container"),
+                kit: OnceLock::new(),
+            },
+            // B: lifted ground (like DMS's own panels), dank16 for every status colour.
+            "B" => Palette {
+                ground: c("surface_container"),
+                card: c("surface_container"),
+                popover: c("surface_container_highest"),
+                ink: c("on_surface"),
+                muted: c("on_surface_variant"),
+                accent: c("primary"),
+                accent2: c("secondary"),
+                live: c("color2"),
+                warning: c("color3"),
+                danger: c("color1"),
+                on_accent: c("on_primary"),
+                terminal_selection: c("secondary_container"),
+                kit: OnceLock::new(),
+            },
+            // C: deepest ground, popovers one step up, neutral selection.
+            _ => Palette {
+                ground: c("surface_container_lowest"),
+                card: c("surface_container_lowest"),
+                popover: c("surface_container"),
+                ink: c("on_surface"),
+                muted: c("on_surface_variant"),
+                accent: c("primary"),
+                accent2: c("tertiary"),
+                live: c("color2"),
+                warning: c("color3"),
+                danger: c("error"),
+                on_accent: c("on_primary"),
+                terminal_selection: c("surface_variant"),
+                kit: OnceLock::new(),
+            },
+        };
+        Some(&*Box::leak(Box::new(p)))
+    })
+}
+
 /// The palette a chrome theme draws in.
 pub fn palette_of(chrome: ChromeTheme) -> &'static Palette {
+    if let Some(p) = proto_palette() {
+        return p;
+    }
     match chrome {
         ChromeTheme::Midnight => &MIDNIGHT,
         ChromeTheme::RosePine => &ROSE_PINE,
